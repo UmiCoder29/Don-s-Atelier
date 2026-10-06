@@ -1,0 +1,426 @@
+// Don's Atelier - Secure E-Commerce & Bespoke Tailoring Backend
+// Prisma Schema Definition
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ==============================================================================
+// ENUMS
+// ==============================================================================
+
+// User role enum for RBAC
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+// Status lifecycle for Product catalog items (supports soft-delete)
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+// Status lifecycle for Customer Orders
+enum OrderStatus {
+  PENDING
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+// Status lifecycle for Bespoke / Custom Orders
+enum CustomOrderStatus {
+  SUBMITTED
+  IN_REVIEW
+  QUOTED
+  ACCEPTED
+  IN_PRODUCTION
+  READY
+  DELIVERED
+  REJECTED
+}
+
+// Status lifecycle for PCI-Compliant Payment Transactions
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+// ==============================================================================
+// AUTH & USER PROFILES
+// ==============================================================================
+
+// User Profile mapped to Supabase Auth UID
+model Profile {
+  id              String        @id // Matches Supabase auth.users.id
+  email           String        @unique
+  name            String?
+  // Holds sensitive data; will need encryption at rest in a future update
+  phone           String?
+  role            Role          @default(CUSTOMER)
+  addresses       Address[]
+  cart            Cart?
+  orders          Order[]
+  customOrders    CustomOrder[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("profiles")
+}
+
+// Customer Address Book (Fields marked for application-level encryption)
+model Address {
+  id            String   @id @default(uuid())
+  profileId     String
+  profile       Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  // Holds sensitive data; will need encryption at rest in a future update
+  recipientName String
+  // Holds sensitive data; will need encryption at rest in a future update
+  line1         String
+  // Holds sensitive data; will need encryption at rest in a future update
+  line2         String?
+  // Holds sensitive data; will need encryption at rest in a future update
+  city          String
+  // Holds sensitive data; will need encryption at rest in a future update
+  state         String
+  // Holds sensitive data; will need encryption at rest in a future update
+  postalCode    String
+  country       String   // ISO 3166-1 alpha-2 code
+  // Holds sensitive data; will need encryption at rest in a future update
+  phone         String?
+  isDefault     Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([profileId])
+  @@map("addresses")
+}
+
+// ==============================================================================
+// CATALOG
+// ==============================================================================
+
+// Product Categories (hierarchical tree with optional parent)
+model Category {
+  id          String     @id @default(uuid())
+  name        String
+  slug        String     @unique
+  description String?
+  parentId    String?
+  parent      Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children    Category[] @relation("CategoryHierarchy")
+  products    Product[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([slug])
+  @@index([parentId])
+  @@map("categories")
+}
+
+// Pre-made Suit Catalog Items (Core Product Entity)
+model Product {
+  id          String           @id @default(uuid())
+  categoryId  String
+  category    Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  name        String
+  slug        String           @unique
+  description String
+  fabric      String           // e.g. "Super 150s Merino Wool", "Irish Linen"
+  fit         String           // e.g. "Slim Fit", "Classic Fit", "Modern Fit"
+  brand       String           @default("Don's Atelier")
+  status      ProductStatus    @default(DRAFT) // Soft delete via ARCHIVED
+  variants    ProductVariant[]
+  images      ProductImage[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([slug])
+  @@index([categoryId])
+  @@index([status])
+  @@map("products")
+}
+
+// Pre-made Product Variants (Specific size, color, inventory, and pricing)
+model ProductVariant {
+  id            String      @id @default(uuid())
+  productId     String
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Restrict)
+  size          String      // e.g., "38R", "40R", "42L"
+  color         String      // e.g., "Midnight Navy", "Charcoal Grey"
+  sku           String      @unique // e.g., "DA-SUIT-NVY-38R"
+  priceInCents  Int         // Stored strictly in integer cents (server computed)
+  stockQuantity Int         @default(0) // Inventory counter managed server-side
+  active        Boolean     @default(true) // Variant-level soft availability switch
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  // Composite constraint prevents duplicate variants for same product, size, and color
+  @@unique([productId, size, color])
+  @@index([productId])
+  @@index([sku])
+  @@index([active])
+  @@map("product_variants")
+}
+
+// Product Media / Showcase Images (Stored in Supabase Storage)
+model ProductImage {
+  id          String   @id @default(uuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  storagePath String   // Relative Supabase Storage path
+  altText     String   // Accessibility & SEO
+  sortOrder   Int      @default(0) // 0 = primary/hero image
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([productId])
+  @@index([sortOrder])
+  @@map("product_images")
+}
+
+// ==============================================================================
+// CART & SHOPPING BAG
+// ==============================================================================
+
+// Customer Shopping Cart (One active cart per profile)
+model Cart {
+  id        String     @id @default(uuid())
+  profileId String     @unique
+  profile   Profile    @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@map("carts")
+}
+
+// Items within Cart (Unique per cart + product variant)
+model CartItem {
+  id               String         @id @default(uuid())
+  cartId           String
+  cart             Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productVariantId String
+  productVariant   ProductVariant @relation(fields: [productVariantId], references: [id], onDelete: Cascade)
+  quantity         Int            @default(1)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@unique([cartId, productVariantId])
+  @@index([cartId])
+  @@index([productVariantId])
+  @@map("cart_items")
+}
+
+// ==============================================================================
+// ORDERS & CHECKOUT
+// ==============================================================================
+
+// Customer Orders with Snapshotting and Idempotency
+model Order {
+  id              String      @id @default(uuid())
+  orderNumber     String      @unique // e.g. "DA-2026-XXXX"
+  profileId       String
+  profile         Profile     @relation(fields: [profileId], references: [id], onDelete: Restrict)
+  status          OrderStatus @default(PENDING)
+  subtotalInCents Int         // Computed on server from database items
+  shippingInCents Int         @default(0) // Server-computed shipping fee
+  totalInCents    Int         // subtotalInCents + shippingInCents
+  // Holds sensitive data; will need encryption at rest in a future update
+  shippingAddress Json        // Snapshot of shipping address at purchase
+  idempotencyKey  String?     // Prevents duplicate checkouts
+  items           OrderItem[]
+  payments        Payment[]
+  statusHistory   OrderStatusHistory[]
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@unique([profileId, idempotencyKey])
+  @@index([profileId])
+  @@index([status])
+  @@index([idempotencyKey])
+  @@map("orders")
+}
+
+// Order Items (Immutable snapshot of product details and price at moment of purchase)
+model OrderItem {
+  id               String          @id @default(uuid())
+  orderId          String
+  order            Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productVariantId String?
+  productVariant   ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+  name             String          // Snapshot of product name
+  size             String          // Snapshot of size
+  color            String          // Snapshot of color
+  unitPriceInCents Int             // Snapshot of price per unit at checkout
+  quantity         Int             @default(1)
+  subtotalInCents  Int             // quantity * unitPriceInCents
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([orderId])
+  @@index([productVariantId])
+  @@map("order_items")
+}
+
+// PCI-Compliant Payment Records (Zero card or card-adjacent data stored)
+model Payment {
+  id            String        @id @default(uuid())
+  orderId       String
+  order         Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider      String        @default("mock_stripe")
+  providerRef   String        @unique // Provider transaction or payment intent ID
+  status        PaymentStatus @default(PENDING)
+  amountInCents Int
+  currency      String        @default("usd")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([orderId])
+  @@index([providerRef])
+  @@map("payments")
+}
+
+// Audit Trail for Customer Order Status Transitions
+model OrderStatusHistory {
+  id         String       @id @default(uuid())
+  orderId    String
+  order      Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+  changedBy  String       // Profile ID or "system"
+  note       String?
+  timestamp  DateTime     @default(now())
+
+  @@index([orderId])
+  @@index([timestamp])
+  @@map("order_status_history")
+}
+
+// Processed Payment Webhook Events for Idempotent Deduplication
+model ProcessedWebhookEvent {
+  id        String   @id @default(uuid())
+  eventId   String
+  provider  String   @default("mock_stripe")
+  eventType String
+  createdAt DateTime @default(now())
+
+  @@unique([provider, eventId])
+  @@map("processed_webhook_events")
+}
+
+// ==============================================================================
+// BESPOKE / CUSTOM ORDERS
+// ==============================================================================
+
+// Bespoke Custom Suit Request & Lifecycle
+model CustomOrder {
+  id                 String                     @id @default(uuid())
+  orderNumber        String                     @unique // e.g. "CO-2026-XXXX"
+  profileId          String
+  profile            Profile                    @relation(fields: [profileId], references: [id], onDelete: Restrict)
+  description        String
+  occasion           String?                    // Wedding, Gala, Black Tie, Business
+  budgetRange        String?                    // e.g. "$1,500 - $2,500"
+  fabricPreference   String?
+  stylePreference    String?
+  status             CustomOrderStatus          @default(SUBMITTED)
+  quotedPriceInCents Int?                       // Set by Admin upon quotation
+  notes              String?
+  measurements       Measurement[]
+  attachments        CustomOrderAttachment[]
+  statusHistory      CustomOrderStatusHistory[]
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+
+  @@index([profileId])
+  @@index([status])
+  @@map("custom_orders")
+}
+
+// Anatomical Measurements for Custom Orders (Entity-Attribute-Value / EAV structure)
+model Measurement {
+  id            String      @id @default(uuid())
+  customOrderId String
+  customOrder   CustomOrder @relation(fields: [customOrderId], references: [id], onDelete: Cascade)
+  label         String?     // e.g. "Initial Profile", "First Fitting"
+  key           String      // Attribute name, e.g. "chest", "waist", "sleeveLength", "jacketLength"
+  value         String      // Measured value (string representation supporting encrypted or formatted values)
+  unit          String      // Measurement unit, e.g. "inches", "cm", "kg"
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([customOrderId])
+  @@index([customOrderId, key])
+  @@map("measurements")
+}
+
+// Media & Reference Files for Custom Orders (Stored in Supabase Storage)
+model CustomOrderAttachment {
+  id            String      @id @default(uuid())
+  customOrderId String
+  customOrder   CustomOrder @relation(fields: [customOrderId], references: [id], onDelete: Cascade)
+  storagePath   String      // Supabase Storage object path
+  mimeType      String
+  size          Int         // File size in bytes
+  fileName      String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([customOrderId])
+  @@map("custom_order_attachments")
+}
+
+// Audit Trail for Custom Order Status Transitions
+model CustomOrderStatusHistory {
+  id            String            @id @default(uuid())
+  customOrderId String
+  customOrder   CustomOrder       @relation(fields: [customOrderId], references: [id], onDelete: Cascade)
+  fromStatus    CustomOrderStatus?
+  toStatus      CustomOrderStatus
+  changedBy     String            // Profile ID or "system"
+  note          String?
+  timestamp     DateTime          @default(now())
+
+  @@index([customOrderId])
+  @@index([timestamp])
+  @@map("custom_order_status_history")
+}
+
+// ==============================================================================
+// AUDIT LOGGING & COMPLIANCE
+// ==============================================================================
+
+// System-Wide Immutable Audit Trail
+model AuditLog {
+  id        String   @id @default(uuid())
+  actorId   String?  // Profile ID of user or null for system/guest
+  action    String   // e.g. "ORDER_CREATED", "STATUS_UPDATED", "PRICE_QUOTED"
+  entity    String   // e.g. "Order", "CustomOrder", "Product", "Address"
+  entityId  String   // ID of affected entity
+  metadata  Json?    // Detailed event snapshot or delta
+  ip        String?  // Client IP address
+  userAgent String?
+  timestamp DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([actorId])
+  @@index([action])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
