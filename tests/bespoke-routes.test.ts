@@ -3,7 +3,9 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { createSupabaseUserClient } from '@/lib/db/supabase';
 import { POST as createCustomOrder, GET as listCustomOrders } from '@/app/api/custom-orders/route';
-import { GET as getCustomOrderById, PATCH as updateCustomOrder, DELETE as deleteCustomOrder } from '@/app/api/custom-orders/[id]/route';
+import { GET as getCustomOrderById, PATCH as customerEditCustomOrder } from '@/app/api/custom-orders/[id]/route';
+import { PATCH as adminUpdateCustomOrder } from '@/app/api/admin/custom-orders/[id]/route';
+import { POST as acceptCustomOrder } from '@/app/api/custom-orders/[id]/accept/route';
 import { POST as addCustomOrderNote } from '@/app/api/custom-orders/[id]/notes/route';
 import { POST as addCustomOrderMessage } from '@/app/api/custom-orders/[id]/messages/route';
 import { POST as withdrawCustomOrder } from '@/app/api/custom-orders/[id]/withdraw/route';
@@ -133,7 +135,8 @@ describe('Bespoke Custom Order API Routes', () => {
     expect(body.data.id).toBe(createdCustomOrderId);
   });
 
-  it('rejects price quotation attempt by customer with 403 Forbidden', async () => {
+  it('rejects price quotation attempt by customer: 422 on customer PATCH, 403 on admin PATCH', async () => {
+    // A. Attempting to pass quotedPriceInCents on PATCH /api/custom-orders/[id] is rejected with 422
     const req = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}`, {
       method: 'PATCH',
       headers: {
@@ -145,16 +148,35 @@ describe('Bespoke Custom Order API Routes', () => {
       }),
     });
 
-    const res = await updateCustomOrder(req, { params: Promise.resolve({ id: createdCustomOrderId }) });
-    expect(res.status).toBe(403);
+    const res = await customerEditCustomOrder(req, { params: Promise.resolve({ id: createdCustomOrderId }) });
+    expect(res.status).toBe(422);
 
     const body = await res.json();
     expect(body.success).toBe(false);
-    expect(body.error.message).toContain('Only atelier administrators and master tailors');
+
+    // B. Attempting to call PATCH /api/admin/custom-orders/[id] as Customer returns 403 Forbidden
+    const adminReq = new NextRequest(`http://localhost:3000/api/admin/custom-orders/${createdCustomOrderId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${customerAToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        quotedPriceInCents: 280000,
+      }),
+    });
+    const adminRes = await adminUpdateCustomOrder(adminReq, { params: Promise.resolve({ id: createdCustomOrderId }) });
+    expect(adminRes.status).toBe(403);
   });
 
-  it('allows ADMIN to quote price on bespoke order and transitions status to QUOTED', async () => {
-    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}`, {
+  it('allows ADMIN to quote price on bespoke order and transitions status to QUOTED via /api/admin/custom-orders/[id]', async () => {
+    // 1. Transition from SUBMITTED to IN_REVIEW per central state machine
+    await prisma.customOrder.update({
+      where: { id: createdCustomOrderId },
+      data: { status: CustomOrderStatus.IN_REVIEW },
+    });
+
+    const req = new NextRequest(`http://localhost:3000/api/admin/custom-orders/${createdCustomOrderId}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${adminToken}`,
@@ -166,7 +188,7 @@ describe('Bespoke Custom Order API Routes', () => {
       }),
     });
 
-    const res = await updateCustomOrder(req, { params: Promise.resolve({ id: createdCustomOrderId }) });
+    const res = await adminUpdateCustomOrder(req, { params: Promise.resolve({ id: createdCustomOrderId }) });
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -175,20 +197,20 @@ describe('Bespoke Custom Order API Routes', () => {
     expect(body.data.status).toBe(CustomOrderStatus.QUOTED);
   });
 
-  it('allows Customer A to ACCEPT the formal quotation', async () => {
-    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}`, {
-      method: 'PATCH',
+  it('allows Customer A to ACCEPT the formal quotation via POST /api/custom-orders/[id]/accept', async () => {
+    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}/accept`, {
+      method: 'POST',
       headers: {
         'Authorization': `Bearer ${customerAToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        status: CustomOrderStatus.ACCEPTED,
+        expectedPriceInCents: 280000,
         notes: 'Quotation accepted, ready for initial fitting schedule.',
       }),
     });
 
-    const res = await updateCustomOrder(req, { params: Promise.resolve({ id: createdCustomOrderId }) });
+    const res = await acceptCustomOrder(req, { params: Promise.resolve({ id: createdCustomOrderId }) });
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -662,12 +684,12 @@ describe('Bespoke Custom Order API Routes', () => {
       },
     });
     const repeatRes = await withdrawCustomOrder(repeatReq, { params: Promise.resolve({ id: createdCustomOrderId }) });
-    expect(repeatRes.status).toBe(400);
+    expect(repeatRes.status).toBe(409);
     const repeatBody = await repeatRes.json();
-    expect(repeatBody.error.message).toContain('already been withdrawn or closed');
+    expect(repeatBody.error.code).toBe(ErrorCode.CONFLICT);
   });
 
-  it('prevents customer from withdrawing an order once in production', async () => {
+  it('prevents customer from withdrawing an order once in production via POST /withdraw', async () => {
     // 1. Create a fresh order and place it into IN_PRODUCTION
     const prodOrder = await prisma.customOrder.create({
       data: {
@@ -679,19 +701,20 @@ describe('Bespoke Custom Order API Routes', () => {
     });
     createdOrderIds.push(prodOrder.id);
 
-    // 2. Customer A attempts withdrawal via DELETE /api/custom-orders/[id]
-    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${prodOrder.id}`, {
-      method: 'DELETE',
+    // 2. Customer A attempts withdrawal via POST /api/custom-orders/[id]/withdraw
+    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${prodOrder.id}/withdraw`, {
+      method: 'POST',
       headers: {
         'Authorization': `Bearer ${customerAToken}`,
       },
     });
 
-    const res = await deleteCustomOrder(req, { params: Promise.resolve({ id: prodOrder.id }) });
-    expect(res.status).toBe(400);
+    const res = await withdrawCustomOrder(req, { params: Promise.resolve({ id: prodOrder.id }) });
+    expect(res.status).toBe(409);
 
     const body = await res.json();
     expect(body.success).toBe(false);
-    expect(body.error.message).toContain('already in production or completed');
+    expect(body.error.code).toBe(ErrorCode.CONFLICT);
   });
 });
+

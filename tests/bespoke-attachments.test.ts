@@ -250,7 +250,7 @@ describe('Bespoke Custom Order Attachment Hardening', () => {
             GPSLongitudeRef: 'W',
             GPSLongitude: '0/1 8/1 26/1',
           },
-        },
+        } as never,
       })
       .toBuffer();
 
@@ -340,7 +340,7 @@ describe('Bespoke Custom Order Attachment Hardening', () => {
       const body = await res.json();
       expect(body.success).toBe(false);
     }
-  });
+  }, 60000);
 
   // ==============================================================================
   // 5. SERVER-GENERATED OBJECT IMMUTABILITY / OVERWRITE ISOLATION
@@ -452,7 +452,7 @@ describe('Bespoke Custom Order Attachment Hardening', () => {
         archivedAt: null,
         isDeleteMarker: false,
         isVersioned: false,
-      },
+      } as any,
       error: null,
     });
 

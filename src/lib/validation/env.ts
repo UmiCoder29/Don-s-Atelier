@@ -35,6 +35,12 @@ export const envSchema = z.object({
   TRUSTED_IP_HEADER: z
     .enum(['none', 'x-vercel-forwarded-for', 'cf-connecting-ip', 'x-real-ip'])
     .default('none'),
+
+  // WhatsApp Business Integration (digits only with country code, 7-15 digits per E.164)
+  WHATSAPP_BUSINESS_NUMBER: z
+    .string()
+    .regex(/^\d{7,15}$/, 'WHATSAPP_BUSINESS_NUMBER must contain digits only with country code')
+    .default('442079460999'),
 });
 
 export type Env = z.infer<typeof envSchema>;

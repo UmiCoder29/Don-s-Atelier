@@ -177,10 +177,102 @@ export const updateCustomOrderSchema = z
       .max(1000, 'Message cannot exceed 1000 characters')
       .optional()
       .transform((val) => (val ? sanitizeText(val) : undefined)),
+    expectedPriceInCents: priceInCentsSchema.optional(),
+    internalNotes: z
+      .string()
+      .max(2000, 'Internal notes cannot exceed 2000 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
   })
   .strict();
 
 export type UpdateCustomOrderInput = z.infer<typeof updateCustomOrderSchema>;
+
+export const customOrderQuotedPriceSchema = z
+  .number({ required_error: 'Quoted price in cents is required' })
+  .int('Quoted price must be an integer in cents')
+  .positive('Quoted price must be positive')
+  .min(1000, 'Quoted price must be at least 1,000 cents ($10.00)')
+  .max(50_000_000, 'Quoted price cannot exceed 50,000,000 cents ($500,000.00)');
+
+export const customerEditCustomOrderSchema = z
+  .object({
+    description: z
+      .string()
+      .min(10, 'Description must be at least 10 characters')
+      .max(2000, 'Description cannot exceed 2000 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+    occasion: z
+      .string()
+      .max(100, 'Occasion cannot exceed 100 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+    budgetRange: z
+      .string()
+      .max(100, 'Budget range cannot exceed 100 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+    fabricPreference: z
+      .string()
+      .max(200, 'Fabric preference cannot exceed 200 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+    stylePreference: z
+      .string()
+      .max(200, 'Style preference cannot exceed 200 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+  })
+  .strict();
+
+export type CustomerEditCustomOrderInput = z.infer<typeof customerEditCustomOrderSchema>;
+
+export const adminUpdateCustomOrderSchema = z
+  .object({
+    status: z.nativeEnum(CustomOrderStatus).optional(),
+    quotedPriceInCents: customOrderQuotedPriceSchema.optional(),
+    quotedPrice: customOrderQuotedPriceSchema.optional(), // Alias supporting integer cents
+    internalNotes: z
+      .string()
+      .max(2000, 'Internal notes cannot exceed 2000 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+    notes: z
+      .string()
+      .max(2000, 'Notes cannot exceed 2000 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+  })
+  .strict()
+  .refine(
+    (data) => {
+      const price = data.quotedPriceInCents !== undefined ? data.quotedPriceInCents : data.quotedPrice;
+      if (price !== undefined && data.status !== undefined && data.status !== CustomOrderStatus.QUOTED) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message: 'Quoted price can only be specified when setting or updating status to QUOTED',
+      path: ['quotedPriceInCents'],
+    }
+  );
+
+export type AdminUpdateCustomOrderInput = z.infer<typeof adminUpdateCustomOrderSchema>;
+
+export const acceptCustomOrderQuoteSchema = z
+  .object({
+    expectedPriceInCents: customOrderQuotedPriceSchema,
+    notes: z
+      .string()
+      .max(1000, 'Notes cannot exceed 1000 characters')
+      .optional()
+      .transform((val) => (val ? sanitizeText(val) : undefined)),
+  })
+  .strict();
+
+export type AcceptCustomOrderQuoteInput = z.infer<typeof acceptCustomOrderQuoteSchema>;
 
 export const listCustomOrdersQuerySchema = paginationSchema
   .extend({
@@ -195,3 +287,5 @@ export const customOrderIdParamSchema = z
     id: uuidSchema,
   })
   .strict();
+
+

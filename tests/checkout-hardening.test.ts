@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { createSupabaseUserClient, supabaseAdmin } from '@/lib/db/supabase';

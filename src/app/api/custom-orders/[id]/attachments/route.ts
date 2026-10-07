@@ -17,6 +17,7 @@ import {
 } from '@/services/bespoke/attachment-sanitizer';
 import { supabaseAdmin } from '@/lib/db/supabase';
 import { STORAGE_BUCKETS } from '@/lib/storage/buckets';
+import { logger } from '@/lib/api/logger';
 
 interface RouteContext {
   params: Promise<{ id: string }> | { id: string };
