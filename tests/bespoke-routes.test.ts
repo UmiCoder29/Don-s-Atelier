@@ -17,8 +17,11 @@ describe('Bespoke Custom Order API Routes', () => {
   const customerAEmail = 'james.harrington@example.com';
   const customerBEmail = 'clara.beaumont@example.com';
   const adminEmail = 'admin@dons-atelier.com';
-  const customerPassword = process.env.SEED_CUSTOMER_PASSWORD || 'DonAtelierCustomer2026!Secure';
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD || 'DonAtelierAdmin2026!Secure';
+  const customerPassword = process.env.SEED_CUSTOMER_PASSWORD;
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD;
+  if (!customerPassword || !adminPassword) {
+    throw new Error('SEED_CUSTOMER_PASSWORD and SEED_ADMIN_PASSWORD environment variables are required');
+  }
 
   let customerAToken: string;
   let customerBToken: string;

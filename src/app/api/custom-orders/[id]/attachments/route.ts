@@ -12,6 +12,7 @@ import { logAuditEventFromRequest } from '@/lib/audit/audit-logger';
 import {
   validateCustomOrderStoragePath,
   revalidateAndSanitizeAttachment,
+  sanitizeClientFileName,
   SanitizedAttachmentResult,
 } from '@/services/bespoke/attachment-sanitizer';
 import { supabaseAdmin } from '@/lib/db/supabase';
@@ -29,8 +30,7 @@ export const uploadAttachmentSchema = z.object({
   fileName: z
     .string()
     .min(1, 'File name is required')
-    .max(255, 'File name cannot exceed 255 characters')
-    .transform(sanitizeText)
+    .transform((val) => sanitizeClientFileName(sanitizeText(val)) || 'attachment')
     .optional(),
   mimeType: z.enum(
     ['image/jpeg', 'image/png', 'image/webp'],
@@ -140,12 +140,25 @@ export const POST = withErrorHandler<RouteContext>(async (req: NextRequest, cont
 
     return successResponse(attachment, requestId, {}, 201);
   } catch (err) {
-    // If database transaction failed (e.g. cap reached), clean up newly uploaded sanitized file
+    // If database transaction failed (e.g. 5-image cap reached) or anything failed
+    // AFTER the sanitized object was uploaded, delete that sanitized object from storage.
     if (sanitized?.storagePath) {
-      await supabaseAdmin.storage
-        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
-        .remove([sanitized.storagePath])
-        .catch(() => {});
+      try {
+        const { error: removeErr } = await supabaseAdmin.storage
+          .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+          .remove([sanitized.storagePath]);
+        if (removeErr) {
+          logger.warn('Failed to delete sanitized storage object after transaction failure', {
+            storagePath: sanitized.storagePath,
+            error: removeErr.message,
+          });
+        }
+      } catch (cleanupErr) {
+        logger.warn('Error during sanitized storage object deletion on failure', {
+          storagePath: sanitized.storagePath,
+          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        });
+      }
     }
     throw err;
   }

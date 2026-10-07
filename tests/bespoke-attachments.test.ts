@@ -8,11 +8,15 @@ import { POST as createAttachmentRoute } from '@/app/api/custom-orders/[id]/atta
 import { ErrorCode } from '@/lib/errors/error-codes';
 import { CustomOrderStatus } from '@prisma/client';
 import { rateLimiter } from '@/lib/security/rate-limiter';
+import { sanitizeClientFileName } from '@/services/bespoke/attachment-sanitizer';
 
 describe('Bespoke Custom Order Attachment Hardening', () => {
   const customerAEmail = 'james.harrington@example.com';
   const customerBEmail = 'clara.beaumont@example.com';
-  const customerPassword = process.env.SEED_CUSTOMER_PASSWORD || 'DonAtelierCustomer2026!Secure';
+  const customerPassword = process.env.SEED_CUSTOMER_PASSWORD;
+  if (!customerPassword) {
+    throw new Error('SEED_CUSTOMER_PASSWORD environment variable is required');
+  }
 
   let customerAToken: string;
   let customerBToken: string;
@@ -472,25 +476,387 @@ describe('Bespoke Custom Order Attachment Hardening', () => {
       }),
     });
 
+    try {
+      const res = await createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
+      expect(res.status).toBe(422);
+
+      const body = await res.json();
+      expect(body.success).toBe(false);
+      expect(body.error.code).toBe(ErrorCode.VALIDATION_ERROR);
+      expect(body.error.message).toContain('File size');
+
+      // Confirm download was NEVER called (rejected before full download)
+      expect(downloadSpy).not.toHaveBeenCalledWith(oversizedPath);
+
+      // Confirm orphan was deleted
+      const existsAfter = await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .exists(oversizedPath);
+      expect(existsAfter.data).toBe(false);
+    } finally {
+      fromSpy.mockRestore();
+      infoSpy.mockRestore();
+      downloadSpy.mockRestore();
+    }
+  });
+
+  // ==============================================================================
+  // 7. FAIL CLOSED ON UNKNOWN SIZE (METADATA LOOKUP FAILURE)
+  // ==============================================================================
+
+  it('simulated metadata failure means rejected with generic error, download never called, and orphan deleted', async () => {
+    const order = await prisma.customOrder.create({
+      data: {
+        orderNumber: `CO-META-FAIL-${Date.now()}`,
+        profileId: customerAId,
+        description: 'Bespoke suit request for simulated metadata failure test',
+        status: CustomOrderStatus.SUBMITTED,
+      },
+    });
+    createdOrderIds.push(order.id);
+
+    const testPath = `custom-orders/${customerAId}/meta-fail-${Date.now()}.jpg`;
+    const validBuf = await createValidJpeg();
+    await supabaseAdmin.storage
+      .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+      .upload(testPath, validBuf, { contentType: 'image/jpeg', upsert: true });
+
+    // Mock storage info and list to fail / return no size
+    const originalFrom = supabaseAdmin.storage.from.bind(supabaseAdmin.storage);
+    const fileApi = originalFrom(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS);
+
+    const infoSpy = vi.spyOn(fileApi, 'info').mockResolvedValue({
+      data: null,
+      error: { name: 'StorageError', message: 'Storage metadata lookup service error' } as any,
+    });
+    const listSpy = vi.spyOn(fileApi, 'list').mockResolvedValue({
+      data: [],
+      error: null,
+    });
+
+    const downloadSpy = vi.spyOn(fileApi, 'download');
+    const fromSpy = vi.spyOn(supabaseAdmin.storage, 'from').mockImplementation(((b: string) => {
+      if (b === STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS) {
+        return fileApi;
+      }
+      return originalFrom(b);
+    }) as any);
+
+    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}/attachments`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${customerAToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        fileName: 'meta-fail.jpg',
+        storagePath: testPath,
+      }),
+    });
+
+    try {
+      const res = await createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
+      expect(res.status).toBe(422);
+
+      const body = await res.json();
+      expect(body.success).toBe(false);
+      expect(body.error.code).toBe(ErrorCode.VALIDATION_ERROR);
+      expect(body.error.message).toContain('File size verification failed');
+
+      // Confirm download was NEVER called
+      expect(downloadSpy).not.toHaveBeenCalled();
+
+      // Confirm orphan was deleted from storage
+      const existsAfter = await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .exists(testPath);
+      expect(existsAfter.data).toBe(false);
+    } finally {
+      fromSpy.mockRestore();
+      infoSpy.mockRestore();
+      listSpy.mockRestore();
+      downloadSpy.mockRestore();
+    }
+  });
+
+  // ==============================================================================
+  // 8. EXIF ORIENTATION 6 AUTO-ROTATION AND EXIF STRIPPING
+  // ==============================================================================
+
+  it('JPEG with EXIF orientation 6: output dimensions are swapped and no EXIF remains', async () => {
+    const order = await prisma.customOrder.create({
+      data: {
+        orderNumber: `CO-ORIENT-${Date.now()}`,
+        profileId: customerAId,
+        description: 'Bespoke suit request for orientation 6 rotation test',
+        status: CustomOrderStatus.SUBMITTED,
+      },
+    });
+    createdOrderIds.push(order.id);
+
+    // Initial image is 100 wide x 60 high with orientation 6 (90 deg CW rotation)
+    const initialWidth = 100;
+    const initialHeight = 60;
+    const orient6Jpeg = await sharp({
+      create: {
+        width: initialWidth,
+        height: initialHeight,
+        channels: 3,
+        background: { r: 120, g: 80, b: 200 },
+      },
+    })
+      .jpeg()
+      .withMetadata({ orientation: 6 })
+      .toBuffer();
+
+    const metaBefore = await sharp(orient6Jpeg).metadata();
+    expect(metaBefore.width).toBe(initialWidth);
+    expect(metaBefore.height).toBe(initialHeight);
+    expect(metaBefore.orientation).toBe(6);
+    expect(metaBefore.exif).toBeDefined();
+
+    const orientPath = `custom-orders/${customerAId}/orient6-${Date.now()}.jpg`;
+    await supabaseAdmin.storage
+      .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+      .upload(orientPath, orient6Jpeg, { contentType: 'image/jpeg', upsert: true });
+
+    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}/attachments`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${customerAToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        fileName: 'oriented-portrait.jpg',
+        storagePath: orientPath,
+      }),
+    });
+
     const res = await createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(201);
 
     const body = await res.json();
-    expect(body.success).toBe(false);
-    expect(body.error.code).toBe(ErrorCode.VALIDATION_ERROR);
-    expect(body.error.message).toContain('File size');
+    expect(body.success).toBe(true);
+    const newStoragePath = body.data.storagePath;
+    uploadedStoragePaths.push(newStoragePath);
 
-    // Confirm download was NEVER called (rejected before full download)
-    expect(downloadSpy).not.toHaveBeenCalledWith(oversizedPath);
-
-    // Confirm orphan was deleted
-    const existsAfter = await supabaseAdmin.storage
+    // Download sanitized image from storage
+    const { data: blob } = await supabaseAdmin.storage
       .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
-      .exists(oversizedPath);
-    expect(existsAfter.data).toBe(false);
+      .download(newStoragePath);
+    expect(blob).toBeDefined();
 
-    fromSpy.mockRestore();
-    infoSpy.mockRestore();
-    downloadSpy.mockRestore();
+    const sanitizedBuf = Buffer.from(await blob!.arrayBuffer());
+    const metaAfter = await sharp(sanitizedBuf).metadata();
+
+    // Dimensions must be swapped (100x60 rotated 90 deg CW becomes 60x100)
+    expect(metaAfter.width).toBe(initialHeight);
+    expect(metaAfter.height).toBe(initialWidth);
+
+    // EXIF must be completely stripped
+    expect(metaAfter.exif).toBeUndefined();
+    expect(metaAfter.orientation).toBeUndefined();
   });
+
+  // ==============================================================================
+  // 9. CLIENT-SUPPLIED FILENAME SANITIZATION & STORAGE PATH ISOLATION
+  // ==============================================================================
+
+  it('client-supplied fileName strips path separators, control characters, null bytes, caps length, and is never used as storage path', async () => {
+    const order = await prisma.customOrder.create({
+      data: {
+        orderNumber: `CO-NAME-${Date.now()}`,
+        profileId: customerAId,
+        description: 'Bespoke suit request for client fileName sanitization test',
+        status: CustomOrderStatus.SUBMITTED,
+      },
+    });
+    createdOrderIds.push(order.id);
+
+    const testPath = `custom-orders/${customerAId}/name-test-${Date.now()}.jpg`;
+    const validBuf = await createValidJpeg();
+    await supabaseAdmin.storage
+      .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+      .upload(testPath, validBuf, { contentType: 'image/jpeg', upsert: true });
+
+    // Malicious fileName containing directory separators, null bytes, control chars, and excessive length
+    const dirtyFileName = `../../nested\\dir\0\x08\x1b[31m${'a'.repeat(300)}-sketch.jpg`;
+
+    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}/attachments`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${customerAToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        fileName: dirtyFileName,
+        storagePath: testPath,
+      }),
+    });
+
+    const res = await createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
+    expect(res.status).toBe(201);
+
+    const body = await res.json();
+    expect(body.success).toBe(true);
+
+    const returnedFileName = body.data.fileName;
+    const returnedStoragePath = body.data.storagePath;
+    uploadedStoragePaths.push(returnedStoragePath);
+
+    // 1. Path separators and null bytes stripped from fileName
+    expect(returnedFileName).not.toContain('/');
+    expect(returnedFileName).not.toContain('\\');
+    expect(returnedFileName).not.toContain('\0');
+    expect(/[\x00-\x1f\x7f-\x9f]/.test(returnedFileName)).toBe(false);
+
+    // 2. Length is capped to max 255 chars
+    expect(returnedFileName.length).toBeLessThanOrEqual(255);
+
+    // 3. Storage path is NEVER constructed from client fileName
+    expect(returnedStoragePath).not.toContain('nested');
+    expect(returnedStoragePath).not.toContain('dir');
+    expect(returnedStoragePath).not.toContain('sketch');
+    expect(returnedStoragePath).toMatch(new RegExp(`^custom-orders/${customerAId}/[a-f0-9-]{36}\\.jpg$`));
+  });
+
+  // ==============================================================================
+  // 10. UNICODE BIDI AND INVISIBLE CHARACTER STRIPPING (U+202E, ETC.)
+  // ==============================================================================
+
+  it('a name containing U+202E comes out with it removed (both unit and attachment route)', async () => {
+    // 1. Direct function assertion
+    const bidiName = 'customer-order\u202Egpj.exe';
+    const cleaned = sanitizeClientFileName(bidiName);
+    expect(cleaned).toBe('customer-ordergpj.exe');
+    expect(cleaned).not.toContain('\u202E');
+
+    // Also verify other invisible/bidi characters: U+200B-200F, U+202A-202E, U+2066-2069, U+FEFF
+    const complexInvis = '\u200Bbespoke\u200Csuit\u202Atest\u202Ephoto\u2066sample\uFEFF.jpg';
+    const cleanedComplex = sanitizeClientFileName(complexInvis);
+    expect(cleanedComplex).toBe('bespokesuittestphotosample.jpg');
+
+    // 2. Route-level integration assertion
+    const order = await prisma.customOrder.create({
+      data: {
+        orderNumber: `CO-BIDI-${Date.now()}`,
+        profileId: customerAId,
+        description: 'Bespoke suit request for U+202E bidi stripping test',
+        status: CustomOrderStatus.SUBMITTED,
+      },
+    });
+    createdOrderIds.push(order.id);
+
+    const testPath = `custom-orders/${customerAId}/bidi-test-${Date.now()}.jpg`;
+    const validBuf = await createValidJpeg();
+    await supabaseAdmin.storage
+      .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+      .upload(testPath, validBuf, { contentType: 'image/jpeg', upsert: true });
+
+    const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}/attachments`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${customerAToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        fileName: 'bespoke-suit\u202Ephoto.jpg',
+        storagePath: testPath,
+      }),
+    });
+
+    const res = await createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
+    expect(res.status).toBe(201);
+
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.data.fileName).toBe('bespoke-suitphoto.jpg');
+    expect(body.data.fileName).not.toContain('\u202E');
+    uploadedStoragePaths.push(body.data.storagePath);
+  });
+
+  // ==============================================================================
+  // 11. ORPHAN CLEANUP ON 5-IMAGE CAP FAILURE (7 CONCURRENT ON ORDER WITH 0 ATTACHMENTS)
+  // ==============================================================================
+
+  it('fire 7 concurrent attachments at an order with 0 attachments: exactly 5 DB rows AND exactly 5 sanitized objects in storage under that order path', async () => {
+    // 1. Create order with 0 attachments for Customer B
+    const order = await prisma.customOrder.create({
+      data: {
+        orderNumber: `CO-CAP7-${Date.now()}`,
+        profileId: customerBId,
+        description: 'Bespoke suit request for 7 concurrent attachment cap & storage cleanup test',
+        status: CustomOrderStatus.SUBMITTED,
+      },
+    });
+    createdOrderIds.push(order.id);
+
+    // Clean up any pre-existing files in customerB's folder to ensure a clean slate
+    const { data: existingFiles } = await supabaseAdmin.storage
+      .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+      .list(`custom-orders/${customerBId}`);
+    if (existingFiles && existingFiles.length > 0) {
+      const oldPaths = existingFiles.map((f) => `custom-orders/${customerBId}/${f.name}`);
+      await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .remove(oldPaths);
+    }
+
+    // 2. Upload 7 valid initial files
+    const initialPaths: string[] = [];
+    for (let i = 1; i <= 7; i++) {
+      const uPath = `custom-orders/${customerBId}/batch7-${i}-${Date.now()}.jpg`;
+      const buf = await createValidJpeg({ r: 25 * i, g: 30 * i, b: 35 * i });
+      await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .upload(uPath, buf, { contentType: 'image/jpeg', upsert: true });
+      initialPaths.push(uPath);
+      uploadedStoragePaths.push(uPath);
+    }
+
+    // 3. Fire 7 concurrent attachments
+    const promises = initialPaths.map((p, idx) => {
+      const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}/attachments`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${customerBToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileName: `fabric-${idx + 1}.jpg`,
+          storagePath: p,
+        }),
+      });
+      return createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
+    });
+
+    const results = await Promise.all(promises);
+
+    const succeeded = results.filter((r) => r.status === 201);
+    const rejected = results.filter((r) => r.status >= 400);
+
+    expect(succeeded.length).toBe(5);
+    expect(rejected.length).toBe(2);
+
+    // 4. Assert exactly 5 DB rows
+    const dbAttachments = await prisma.customOrderAttachment.findMany({
+      where: { customOrderId: order.id },
+    });
+    expect(dbAttachments.length).toBe(5);
+
+    // 5. Assert exactly 5 sanitized objects in storage under that order's path
+    const { data: storageObjects } = await supabaseAdmin.storage
+      .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+      .list(`custom-orders/${customerBId}`);
+
+    expect(storageObjects).toBeDefined();
+    expect(storageObjects!.length).toBe(5);
+
+    // Verify all 5 storage objects match the 5 DB attachment rows
+    const dbObjectNames = dbAttachments.map((att) => att.storagePath.split('/').pop());
+    for (const obj of storageObjects!) {
+      expect(dbObjectNames).toContain(obj.name);
+      uploadedStoragePaths.push(`custom-orders/${customerBId}/${obj.name}`);
+    }
+  }, 90000);
 });
