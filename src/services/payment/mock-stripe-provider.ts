@@ -43,11 +43,16 @@ export class MockStripePaymentProvider implements PaymentProvider {
     const id = `pi_mock_${randomUUID().replace(/-/g, '').substring(0, 24)}`;
     const secret = `pi_${id}_secret_${randomUUID().replace(/-/g, '').substring(0, 16)}`;
 
-    const simulation =
-      params.simulation ||
-      (params.metadata?.simulation as PaymentSimulationStatus) ||
-      this.defaultSimulation ||
-      'pending';
+    const isSimulationAllowed =
+      process.env.PAYMENT_MODE === 'mock' &&
+      process.env.NODE_ENV !== 'production';
+
+    const simulation = isSimulationAllowed
+      ? (params.simulation ||
+         (params.metadata?.simulation as PaymentSimulationStatus) ||
+         this.defaultSimulation ||
+         'pending')
+      : 'pending';
 
     let status: PaymentIntent['status'] = 'requires_payment_method';
     if (simulation === 'succeeded') {

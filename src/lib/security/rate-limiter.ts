@@ -210,7 +210,7 @@ export const rateLimiter = new RateLimiter();
  * Rules:
  * - Allowed values: 'none', 'x-vercel-forwarded-for', 'cf-connecting-ip', 'x-real-ip'. Default: 'none'.
  * - Must read ONLY the single header named there.
- * - With 'none', use the connection IP (`(req as any).ip`), else '127.0.0.1'.
+ * - With 'none', use the connection IP (`req.ip`), else '127.0.0.1'.
  * - If set to a header name, read ONLY that single header. If absent/empty, fall back to connection IP, else '127.0.0.1'.
  * - Unconditional reading of the other headers and all X-Forwarded-For parsing is removed.
  */
@@ -231,7 +231,7 @@ export function getClientIp(req: NextRequest): string {
   }
 
   // With 'none' (or if the configured header is absent): use connection IP, else '127.0.0.1'
-  const connectionIp = (req as any).ip;
+  const connectionIp = (req as Request & { ip?: string }).ip;
   if (typeof connectionIp === 'string' && connectionIp.trim()) {
     return connectionIp.trim();
   }

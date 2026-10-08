@@ -8,11 +8,32 @@ import { POST as cartRoute } from '@/app/api/cart/route';
 import { POST as uploadRoute } from '@/app/api/uploads/route';
 import { PATCH as updateProfileRoute } from '@/app/api/account/profile/route';
 import { GET as csrfRoute } from '@/app/api/auth/csrf/route';
+import { DELETE as clearCartRoute } from '@/app/api/cart/route';
+import { PATCH as updateCartItemRoute, DELETE as deleteCartItemRoute } from '@/app/api/cart/items/[id]/route';
+import { PATCH as patchCustomOrderRoute } from '@/app/api/custom-orders/[id]/route';
+import { POST as acceptCustomOrderRoute } from '@/app/api/custom-orders/[id]/accept/route';
+import { POST as addAttachmentRoute } from '@/app/api/custom-orders/[id]/attachments/route';
+import { POST as addMessageRoute } from '@/app/api/custom-orders/[id]/messages/route';
+import { POST as addNoteRoute } from '@/app/api/custom-orders/[id]/notes/route';
+import { POST as withdrawCustomOrderRoute } from '@/app/api/custom-orders/[id]/withdraw/route';
+import { POST as cancelOrderRoute } from '@/app/api/orders/[id]/cancel/route';
+import { POST as signedUrlRoute } from '@/app/api/uploads/signed-url/route';
+import { POST as createProductRoute } from '@/app/api/admin/products/route';
+import { POST as uploadProductImageRoute } from '@/app/api/admin/products/images/route';
+import { PATCH as updateProductRoute, DELETE as deleteProductRoute } from '@/app/api/admin/products/[id]/route';
+import { POST as archiveProductRoute } from '@/app/api/admin/products/[id]/archive/route';
+import { POST as uploadProductImageByIdRoute } from '@/app/api/admin/products/[id]/images/route';
+import { POST as createVariantRoute } from '@/app/api/admin/products/[id]/variants/route';
+import { PATCH as updateRoleRoute } from '@/app/api/admin/users/[id]/role/route';
+import { PATCH as updateVariantRoute } from '@/app/api/admin/variants/[id]/route';
+import { POST as adjustStockRoute } from '@/app/api/admin/variants/[id]/stock/route';
+import { PATCH as adminUpdateCustomOrderRoute } from '@/app/api/admin/custom-orders/[id]/route';
+import { PATCH as adminUpdateOrderRoute } from '@/app/api/admin/orders/[id]/route';
 import { rateLimiter, getClientIp } from '@/lib/security/rate-limiter';
 import { CSRF_COOKIE_NAME, CSRF_HEADER_NAME } from '@/lib/security/csrf';
 import { AUTH_ACCESS_COOKIE } from '@/lib/auth/cookies';
 import { sanitizeText } from '@/lib/validation/sanitizer';
-import { logAuditEvent } from '@/lib/audit/audit-logger';
+import { logAuditEvent, sanitizeAuditString, sanitizeAuditMetadata } from '@/lib/audit/audit-logger';
 import { prisma } from '@/lib/db/prisma';
 import { ErrorCode } from '@/lib/errors/error-codes';
 import { createSupabaseUserClient } from '@/lib/db/supabase';
@@ -471,7 +492,7 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       rateLimiter.setRule('checkout', { maxRequests: 2, windowSeconds: 60 });
 
       const makeCheckoutReq = (ip: string) => {
-        const req = new NextRequest('http://localhost:3000/api/orders', {
+        const req = new NextRequest('http://localhost:3000/api/checkout', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -502,7 +523,7 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       expect(r3.headers.get('Retry-After')).toBeDefined();
 
       // Conversely, a DIFFERENT user (adminToken) on IP Gamma is NOT blocked by customer's user limit
-      const differentUserReq = new NextRequest('http://localhost:3000/api/orders', {
+      const differentUserReq = new NextRequest('http://localhost:3000/api/checkout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -734,6 +755,85 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       const body = await res.json();
       expect(body.error.code).toBe(ErrorCode.UNAUTHORIZED);
     });
+
+    describe('Table-driven CSRF verification across mutating routes', () => {
+      const dummyId = '11111111-1111-1111-1111-111111111111';
+      const routeCases: Array<{
+        name: string;
+        method: string;
+        url: string;
+        handler: (req: NextRequest, ctx: any) => Promise<Response>;
+        context?: any;
+      }> = [
+        { name: 'PATCH /api/account/profile', method: 'PATCH', url: 'http://localhost:3000/api/account/profile', handler: updateProfileRoute },
+        { name: 'POST /api/cart', method: 'POST', url: 'http://localhost:3000/api/cart', handler: cartRoute },
+        { name: 'DELETE /api/cart', method: 'DELETE', url: 'http://localhost:3000/api/cart', handler: clearCartRoute },
+        { name: 'PATCH /api/cart/items/[id]', method: 'PATCH', url: `http://localhost:3000/api/cart/items/${dummyId}`, handler: updateCartItemRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'DELETE /api/cart/items/[id]', method: 'DELETE', url: `http://localhost:3000/api/cart/items/${dummyId}`, handler: deleteCartItemRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/checkout', method: 'POST', url: 'http://localhost:3000/api/checkout', handler: checkoutRoute, context: { params: Promise.resolve({}) } },
+        { name: 'POST /api/custom-orders', method: 'POST', url: 'http://localhost:3000/api/custom-orders', handler: customOrderRoute },
+        { name: 'PATCH /api/custom-orders/[id]', method: 'PATCH', url: `http://localhost:3000/api/custom-orders/${dummyId}`, handler: patchCustomOrderRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/custom-orders/[id]/accept', method: 'POST', url: `http://localhost:3000/api/custom-orders/${dummyId}/accept`, handler: acceptCustomOrderRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/custom-orders/[id]/attachments', method: 'POST', url: `http://localhost:3000/api/custom-orders/${dummyId}/attachments`, handler: addAttachmentRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/custom-orders/[id]/messages', method: 'POST', url: `http://localhost:3000/api/custom-orders/${dummyId}/messages`, handler: addMessageRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/custom-orders/[id]/notes', method: 'POST', url: `http://localhost:3000/api/custom-orders/${dummyId}/notes`, handler: addNoteRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/custom-orders/[id]/withdraw', method: 'POST', url: `http://localhost:3000/api/custom-orders/${dummyId}/withdraw`, handler: withdrawCustomOrderRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/orders/[id]/cancel', method: 'POST', url: `http://localhost:3000/api/orders/${dummyId}/cancel`, handler: cancelOrderRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/uploads', method: 'POST', url: 'http://localhost:3000/api/uploads', handler: uploadRoute },
+        { name: 'POST /api/uploads/signed-url', method: 'POST', url: 'http://localhost:3000/api/uploads/signed-url', handler: signedUrlRoute },
+        { name: 'POST /api/admin/products', method: 'POST', url: 'http://localhost:3000/api/admin/products', handler: createProductRoute },
+        { name: 'POST /api/admin/products/images', method: 'POST', url: 'http://localhost:3000/api/admin/products/images', handler: uploadProductImageRoute },
+        { name: 'PATCH /api/admin/products/[id]', method: 'PATCH', url: `http://localhost:3000/api/admin/products/${dummyId}`, handler: updateProductRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'DELETE /api/admin/products/[id]', method: 'DELETE', url: `http://localhost:3000/api/admin/products/${dummyId}`, handler: deleteProductRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/admin/products/[id]/archive', method: 'POST', url: `http://localhost:3000/api/admin/products/${dummyId}/archive`, handler: archiveProductRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/admin/products/[id]/images', method: 'POST', url: `http://localhost:3000/api/admin/products/${dummyId}/images`, handler: uploadProductImageByIdRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/admin/products/[id]/variants', method: 'POST', url: `http://localhost:3000/api/admin/products/${dummyId}/variants`, handler: createVariantRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'PATCH /api/admin/users/[id]/role', method: 'PATCH', url: `http://localhost:3000/api/admin/users/${dummyId}/role`, handler: updateRoleRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'PATCH /api/admin/variants/[id]', method: 'PATCH', url: `http://localhost:3000/api/admin/variants/${dummyId}`, handler: updateVariantRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'POST /api/admin/variants/[id]/stock', method: 'POST', url: `http://localhost:3000/api/admin/variants/${dummyId}/stock`, handler: adjustStockRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'PATCH /api/admin/custom-orders/[id]', method: 'PATCH', url: `http://localhost:3000/api/admin/custom-orders/${dummyId}`, handler: adminUpdateCustomOrderRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+        { name: 'PATCH /api/admin/orders/[id]', method: 'PATCH', url: `http://localhost:3000/api/admin/orders/${dummyId}`, handler: adminUpdateOrderRoute, context: { params: Promise.resolve({ id: dummyId }) } },
+      ];
+
+      for (const routeCase of routeCases) {
+        it(`${routeCase.name}: rejects cookie-authenticated mutation with missing CSRF token (403 Forbidden)`, async () => {
+          const req = new NextRequest(routeCase.url, {
+            method: routeCase.method,
+            headers: {
+              'Content-Type': 'application/json',
+              'Origin': 'http://localhost:3000',
+              'Cookie': `${AUTH_ACCESS_COOKIE}=some-valid-session-cookie`,
+            },
+            body: JSON.stringify({}),
+          });
+          const res = await routeCase.handler(req, routeCase.context || ({} as never));
+          expect(res.status).toBe(403);
+          const body = await res.json();
+          expect(body.success).toBe(false);
+          expect(body.error.code).toBe(ErrorCode.FORBIDDEN);
+          expect(body.error.message).toContain('missing or invalid CSRF token');
+        });
+
+        it(`${routeCase.name}: rejects cookie-authenticated mutation with mismatched CSRF token (403 Forbidden)`, async () => {
+          const req = new NextRequest(routeCase.url, {
+            method: routeCase.method,
+            headers: {
+              'Content-Type': 'application/json',
+              'Origin': 'http://localhost:3000',
+              'Cookie': `${AUTH_ACCESS_COOKIE}=some-valid-session-cookie; ${CSRF_COOKIE_NAME}=token-expected-by-cookie`,
+              [CSRF_HEADER_NAME]: 'forged-attacker-token',
+            },
+            body: JSON.stringify({}),
+          });
+          const res = await routeCase.handler(req, routeCase.context || ({} as never));
+          expect(res.status).toBe(403);
+          const body = await res.json();
+          expect(body.success).toBe(false);
+          expect(body.error.code).toBe(ErrorCode.FORBIDDEN);
+          expect(body.error.message).toContain('missing or invalid CSRF token');
+        });
+      }
+    });
   });
 
   describe('ACCEPTANCE 5: User Free-Text Sanitization', () => {
@@ -781,6 +881,49 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       expect(dbRecord?.action).toBe('TEST_ADMIN_ACTION');
 
       // Cleanup
+      await prisma.auditLog.delete({ where: { id: log!.id } });
+    });
+
+    it('enforces audit hygiene: caps free-text strings at 500 characters and strips control characters', async () => {
+      const rawText = 'Admin note with control chars \x00\x08\x1b\x7f and normal text. ' + 'A'.repeat(600);
+      const sanitized = sanitizeAuditString(rawText);
+
+      expect(sanitized.length).toBeLessThanOrEqual(500);
+      expect(sanitized).not.toContain('\x00');
+      expect(sanitized).not.toContain('\x08');
+      expect(sanitized).not.toContain('\x1b');
+      expect(sanitized).not.toContain('\x7f');
+      expect(sanitized.startsWith('Admin note with control chars  and normal text. ')).toBe(true);
+
+      const metadata = sanitizeAuditMetadata({
+        note: rawText,
+        nested: { innerNote: rawText },
+        list: [rawText],
+      });
+      expect(metadata).toBeDefined();
+      expect((metadata?.note as string).length).toBe(500);
+      expect(((metadata?.nested as any).innerNote as string).length).toBe(500);
+      expect(((metadata?.list as any)[0] as string).length).toBe(500);
+    });
+
+    it('upload audit log stores generated/sanitized objectName, not client filename', async () => {
+      const storagePath = 'custom-orders/user-123/sanitized-uuid-abc.jpg';
+      const log = await logAuditEvent({
+        actorId: '00000000-0000-0000-0000-000000000001',
+        action: 'CUSTOM_ORDER_ATTACHMENT_UPLOADED',
+        entity: 'CustomOrderAttachment',
+        entityId: '00000000-0000-0000-0000-000000000002',
+        metadata: {
+          objectName: storagePath,
+          size: 1024,
+        },
+      });
+
+      expect(log).toBeDefined();
+      const meta = log?.metadata as Record<string, unknown>;
+      expect(meta.objectName).toBe(storagePath);
+      expect(meta.clientFileName).toBeUndefined();
+
       await prisma.auditLog.delete({ where: { id: log!.id } });
     });
   });

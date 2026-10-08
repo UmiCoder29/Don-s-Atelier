@@ -89,6 +89,18 @@ export class PayloadTooLargeError extends ApiError {
   }
 }
 
+export class MethodNotAllowedError extends ApiError {
+  constructor(message = 'Method not allowed') {
+    super(message, 405, ErrorCode.METHOD_NOT_ALLOWED);
+  }
+}
+
+export class ServiceUnavailableError extends ApiError {
+  constructor(message = 'Service temporarily unavailable') {
+    super(message, 503, ErrorCode.SERVICE_UNAVAILABLE);
+  }
+}
+
 export class InternalServerError extends ApiError {
   constructor(message = 'An unexpected internal error occurred') {
     // Non-operational / sanitized message

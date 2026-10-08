@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ZodError } from 'zod';
-import { ApiError, ValidationError, PayloadTooLargeError } from '@/lib/errors/api-error';
+import { ApiError, ValidationError, PayloadTooLargeError, BadRequestError } from '@/lib/errors/api-error';
 import { getOrCreateRequestId } from './request-id';
 import { logger } from './logger';
 import { errorResponse } from './response';
@@ -72,8 +72,12 @@ export function withErrorHandler<TContext = unknown>(
         }
       }
 
-      // 2. CSRF Origin & Token Enforcement on Cookie-Authenticated Mutations (exempt on webhooks)
-      if (!options?.skipCsrf && !pathname.startsWith('/api/webhooks')) {
+      // 2. CSRF Origin & Token Enforcement on Cookie-Authenticated Mutations (exempt on webhooks and internal jobs)
+      if (
+        !options?.skipCsrf &&
+        !pathname.startsWith('/api/webhooks') &&
+        !pathname.startsWith('/api/internal/jobs')
+      ) {
         assertCsrfProtection(req);
       }
 
@@ -104,6 +108,8 @@ export function withErrorHandler<TContext = unknown>(
           message: issue.message,
         }));
         operationalError = new ValidationError(details, 'Request validation failed');
+      } else if (err instanceof SyntaxError) {
+        operationalError = new BadRequestError('Malformed JSON payload in request body');
       }
 
       logger.error(`Failed ${method} ${pathname}`, {

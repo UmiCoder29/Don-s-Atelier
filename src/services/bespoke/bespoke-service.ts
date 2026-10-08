@@ -930,7 +930,13 @@ export class BespokeService {
         }
 
         const current = lockedRows[0];
-        assertOwnerOrAdmin(user, current.profileId);
+
+        // Enforce owner-only: admins must use admin route; non-owners are rejected
+        if (user.role === Role.ADMIN || user.id !== current.profileId) {
+          throw new ForbiddenError(
+            'Customer edit route is reserved strictly for order owners. Administrators must use /api/admin/custom-orders/[id]'
+          );
+        }
 
         if (current.status !== CustomOrderStatus.SUBMITTED) {
           throw new ConflictError(
@@ -941,6 +947,20 @@ export class BespokeService {
         await tx.customOrder.update({
           where: { id: customOrderId },
           data: dataToUpdate,
+        });
+
+        // Write audit entry in the same transaction listing changed FIELD NAMES only, no values
+        const changedFields = Object.keys(dataToUpdate);
+        await tx.auditLog.create({
+          data: {
+            actorId: user.id,
+            action: 'CUSTOM_ORDER_CUSTOMER_EDIT',
+            entity: 'CustomOrder',
+            entityId: customOrderId,
+            metadata: {
+              changedFields,
+            },
+          },
         });
       },
       {

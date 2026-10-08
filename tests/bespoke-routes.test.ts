@@ -169,6 +169,71 @@ describe('Bespoke Custom Order API Routes', () => {
     expect(adminRes.status).toBe(403);
   });
 
+  it('enforces owner-only on customer PATCH /api/custom-orders/[id] (admin gets 403, cross-customer gets 403, owner edit writes audit with changed field names only)', async () => {
+    // 1. ADMIN calling customer PATCH /api/custom-orders/[id] receives 403 Forbidden
+    const adminOnCustomerRouteReq = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${adminToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        description: 'Admin attempting customer edit',
+      }),
+    });
+    const adminOnCustomerRes = await customerEditCustomOrder(adminOnCustomerRouteReq, { params: Promise.resolve({ id: createdCustomOrderId }) });
+    expect(adminOnCustomerRes.status).toBe(403);
+    const adminErrJson = await adminOnCustomerRes.json();
+    expect(adminErrJson.error.message).toContain('Customer edit route is reserved strictly for order owners');
+
+    // 2. Customer B (non-owner) receives 403 Forbidden
+    const customerBReq = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${customerBToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        description: 'Customer B attempting edit',
+      }),
+    });
+    const customerBRes = await customerEditCustomOrder(customerBReq, { params: Promise.resolve({ id: createdCustomOrderId }) });
+    expect(customerBRes.status).toBe(403);
+
+    // 3. Customer A (owner) edit succeeds while order is SUBMITTED
+    const validEditReq = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${customerAToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        description: 'Customer A updated bespoke suit description',
+      }),
+    });
+    const validEditRes = await customerEditCustomOrder(validEditReq, { params: Promise.resolve({ id: createdCustomOrderId }) });
+    expect(validEditRes.status).toBe(200);
+
+    // 4. Assert audit entry was written in the same transaction listing changed FIELD NAMES only, NO values
+    const auditEntries = await prisma.auditLog.findMany({
+      where: {
+        action: 'CUSTOM_ORDER_CUSTOMER_EDIT',
+        entityId: createdCustomOrderId,
+      },
+      orderBy: { timestamp: 'desc' },
+      take: 1,
+    });
+    expect(auditEntries.length).toBe(1);
+    const audit = auditEntries[0];
+    expect(audit.actorId).toBe(customerAId);
+    const metadata = audit.metadata as Record<string, unknown>;
+    expect(metadata.changedFields).toBeDefined();
+    expect(Array.isArray(metadata.changedFields)).toBe(true);
+    expect(metadata.changedFields).toEqual(['description']);
+    // Assert NO values leaked in metadata
+    expect(JSON.stringify(metadata)).not.toContain('Customer A updated bespoke suit description');
+  });
+
   it('allows ADMIN to quote price on bespoke order and transitions status to QUOTED via /api/admin/custom-orders/[id]', async () => {
     // 1. Transition from SUBMITTED to IN_REVIEW per central state machine
     await prisma.customOrder.update({

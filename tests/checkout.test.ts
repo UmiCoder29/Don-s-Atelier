@@ -489,6 +489,9 @@ describe('Checkout, Concurrency Hardening & Webhook Confirmation Suite', { timeo
     });
 
     it('supports immediate payment success simulation via injected provider', async () => {
+      const origMode = process.env.PAYMENT_MODE;
+      process.env.PAYMENT_MODE = 'mock';
+
       await clearCart(customerAId);
       await addToCartDirect(customerAId, testProductVariantId, 1);
 
@@ -519,6 +522,118 @@ describe('Checkout, Concurrency Hardening & Webhook Confirmation Suite', { timeo
         expect(order.status).toBe(OrderStatus.PAID);
         expect(order.payments[0].status).toBe(PaymentStatus.SUCCEEDED);
       } finally {
+        orderService.setPaymentProvider(new MockStripePaymentProvider());
+        if (origMode) process.env.PAYMENT_MODE = origMode; else delete process.env.PAYMENT_MODE;
+      }
+    });
+
+    it('in production + no flag: checkout never marks order PAID and leaves it PENDING', async () => {
+      const origEnv = process.env.NODE_ENV;
+      const origMode = process.env.PAYMENT_MODE;
+      Object.assign(process.env, { NODE_ENV: 'production' });
+      delete process.env.PAYMENT_MODE;
+
+      await clearCart(customerAId);
+      await addToCartDirect(customerAId, testProductVariantId, 1);
+
+      try {
+        const req = new NextRequest('http://localhost:3000/api/checkout', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${customerAToken}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `idemp-prod-noflag-${Date.now()}`,
+          },
+          body: JSON.stringify({
+            addressId: customerAAddressId,
+          }),
+        });
+
+        const res = await checkoutRoute(req, {} as never);
+        expect(res.status).toBe(201);
+        const body = await res.json();
+        const order = body.data.order;
+        createdOrderIds.push(order.id);
+
+        expect(order.status).toBe(OrderStatus.PENDING);
+        expect(order.payments[0].status).toBe(PaymentStatus.PENDING);
+      } finally {
+        Object.assign(process.env, { NODE_ENV: origEnv });
+        if (origMode) process.env.PAYMENT_MODE = origMode; else delete process.env.PAYMENT_MODE;
+      }
+    });
+
+    it('in production + flag set: checkout still NEVER simulates payment and leaves order PENDING', async () => {
+      const origEnv = process.env.NODE_ENV;
+      const origMode = process.env.PAYMENT_MODE;
+      Object.assign(process.env, { NODE_ENV: 'production', PAYMENT_MODE: 'mock' });
+
+      await clearCart(customerAId);
+      await addToCartDirect(customerAId, testProductVariantId, 1);
+
+      try {
+        const req = new NextRequest('http://localhost:3000/api/checkout', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${customerAToken}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `idemp-prod-flag-${Date.now()}`,
+          },
+          body: JSON.stringify({
+            addressId: customerAAddressId,
+          }),
+        });
+
+        const res = await checkoutRoute(req, {} as never);
+        expect(res.status).toBe(201);
+        const body = await res.json();
+        const order = body.data.order;
+        createdOrderIds.push(order.id);
+
+        expect(order.status).toBe(OrderStatus.PENDING);
+        expect(order.payments[0].status).toBe(PaymentStatus.PENDING);
+      } finally {
+        Object.assign(process.env, { NODE_ENV: origEnv });
+        if (origMode) process.env.PAYMENT_MODE = origMode; else delete process.env.PAYMENT_MODE;
+      }
+    });
+
+    it('in development + flag set: simulation allowed to mark order PAID', async () => {
+      const origEnv = process.env.NODE_ENV;
+      const origMode = process.env.PAYMENT_MODE;
+      Object.assign(process.env, { NODE_ENV: 'development', PAYMENT_MODE: 'mock' });
+
+      await clearCart(customerAId);
+      await addToCartDirect(customerAId, testProductVariantId, 1);
+
+      const mockSuccessProvider = new MockStripePaymentProvider();
+      mockSuccessProvider.setSimulation('succeeded');
+      orderService.setPaymentProvider(mockSuccessProvider);
+
+      try {
+        const req = new NextRequest('http://localhost:3000/api/checkout', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${customerAToken}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `idemp-dev-flag-${Date.now()}`,
+          },
+          body: JSON.stringify({
+            addressId: customerAAddressId,
+          }),
+        });
+
+        const res = await checkoutRoute(req, {} as never);
+        expect(res.status).toBe(201);
+        const body = await res.json();
+        const order = body.data.order;
+        createdOrderIds.push(order.id);
+
+        expect(order.status).toBe(OrderStatus.PAID);
+        expect(order.payments[0].status).toBe(PaymentStatus.SUCCEEDED);
+      } finally {
+        Object.assign(process.env, { NODE_ENV: origEnv });
+        if (origMode) process.env.PAYMENT_MODE = origMode; else delete process.env.PAYMENT_MODE;
         orderService.setPaymentProvider(new MockStripePaymentProvider());
       }
     });

@@ -516,6 +516,9 @@ describe('Checkout Hardening Acceptance Suite', { timeout: 120000 }, () => {
       await clearCart(user.id);
       await addToCartDirect(user.id, variant.id, 2);
 
+      const origMode = process.env.PAYMENT_MODE;
+      process.env.PAYMENT_MODE = 'mock';
+
       const mockFailProvider = new MockStripePaymentProvider();
       mockFailProvider.setSimulation('failed');
       orderService.setPaymentProvider(mockFailProvider);
@@ -557,6 +560,7 @@ describe('Checkout Hardening Acceptance Suite', { timeout: 120000 }, () => {
         expect(history.some((h) => h.toStatus === OrderStatus.CANCELLED)).toBe(true);
       } finally {
         orderService.setPaymentProvider(new MockStripePaymentProvider());
+        if (origMode) process.env.PAYMENT_MODE = origMode; else delete process.env.PAYMENT_MODE;
       }
     });
 
@@ -750,6 +754,11 @@ describe('Checkout Hardening Acceptance Suite', { timeout: 120000 }, () => {
         where: { active: true, product: { status: ProductStatus.ACTIVE } },
       });
 
+      await prisma.productVariant.update({
+        where: { id: variant!.id },
+        data: { stockQuantity: { increment: 10 } },
+      });
+
       await clearCart(user.id);
       await addToCartDirect(user.id, variant!.id, 1);
 
@@ -822,7 +831,7 @@ describe('Checkout Hardening Acceptance Suite', { timeout: 120000 }, () => {
       webhookPaymentRef = body.data.paymentIntent.id;
       expectedTotal = body.data.order.totalInCents;
       createdOrderIds.push(webhookOrderId);
-    });
+    }, 60000);
 
     it('does nothing when a webhook event has a wrong/mismatched amount', async () => {
       const wrongAmountPayload = JSON.stringify({
@@ -1225,6 +1234,9 @@ describe('Checkout Hardening Acceptance Suite', { timeout: 120000 }, () => {
       await clearCart(user.id);
       await addToCartDirect(user.id, variant.id, 2);
 
+      const origMode = process.env.PAYMENT_MODE;
+      process.env.PAYMENT_MODE = 'mock';
+
       const mockSuccessProvider = new MockStripePaymentProvider();
       mockSuccessProvider.setSimulation('succeeded');
       orderService.setPaymentProvider(mockSuccessProvider);
@@ -1286,6 +1298,7 @@ describe('Checkout Hardening Acceptance Suite', { timeout: 120000 }, () => {
         expect(stockAfterHook!.stockQuantity).toBe(8);
       } finally {
         orderService.setPaymentProvider(new MockStripePaymentProvider());
+        if (origMode) process.env.PAYMENT_MODE = origMode; else delete process.env.PAYMENT_MODE;
       }
     });
   });

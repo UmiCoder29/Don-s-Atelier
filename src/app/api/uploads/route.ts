@@ -94,7 +94,7 @@ export const POST = withErrorHandler(async (req: NextRequest, _context, requestI
     entity: 'Upload',
     entityId: storagePath,
     metadata: {
-      clientFileName: input.fileName,
+      objectName: storagePath,
       storagePath,
       mimeType: input.mimeType,
       size: input.size,

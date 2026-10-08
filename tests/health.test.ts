@@ -22,14 +22,15 @@ describe('/api/health Route', () => {
     expect(body.meta.requestId).toBe(requestIdHeader);
     expect(body.meta.timestamp).toBeDefined();
 
-    // Verify service metadata
-    expect(body.data).toMatchObject({
+    // Verify service metadata (Prompt 14C: only status and timestamp)
+    expect(body.data).toEqual({
       status: 'ok',
-      service: "Don's Atelier API",
-      package: 'dons-atelier',
-      version: '0.1.0',
+      timestamp: expect.any(String),
     });
-    expect(typeof body.data.uptimeSeconds).toBe('number');
+    expect(body.data.service).toBeUndefined();
+    expect(body.data.package).toBeUndefined();
+    expect(body.data.version).toBeUndefined();
+    expect(body.data.uptimeSeconds).toBeUndefined();
   });
 
   it('preserves client-provided X-Request-Id header if valid', async () => {

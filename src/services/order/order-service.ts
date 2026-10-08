@@ -10,6 +10,18 @@ import { logger } from '@/lib/api/logger';
 import { paymentProvider as defaultPaymentProvider, PaymentProvider, WebhookEvent } from '@/services/payment';
 import { CheckoutInput, ListOrdersQuery, ShippingAddress } from './types';
 import { validateOrderStatusTransition, shouldRestockOnTransition } from './order-state-machine';
+import { Actor, userActor, systemActor } from '@/lib/auth/actor';
+
+function decryptOrderShippingAddress(addressJson: Prisma.JsonValue): ShippingAddress {
+  if (addressJson && typeof addressJson === 'object' && !Array.isArray(addressJson)) {
+    return decryptAddressFields(addressJson as Record<string, unknown>) as unknown as ShippingAddress;
+  }
+  return addressJson as unknown as ShippingAddress;
+}
+
+function encryptOrderShippingAddress(address: ShippingAddress): Prisma.InputJsonValue {
+  return encryptAddressFields(address as unknown as Record<string, unknown>) as unknown as Prisma.InputJsonValue;
+}
 
 /**
  * Service managing customer checkout, server-side order calculation, and order tracking.
@@ -85,7 +97,7 @@ export class OrderService {
         return {
           order: {
             ...existingOrder,
-            shippingAddress: decryptAddressFields(existingOrder.shippingAddress as any),
+            shippingAddress: decryptOrderShippingAddress(existingOrder.shippingAddress),
           },
           paymentIntent: existingOrder.payments[0]
             ? {
@@ -278,7 +290,7 @@ export class OrderService {
               subtotalInCents,
               shippingInCents,
               totalInCents,
-              shippingAddress: encryptAddressFields(finalShippingAddress) as any,
+              shippingAddress: encryptOrderShippingAddress(finalShippingAddress),
               idempotencyKey: idempotencyKey || null,
               items: {
                 create: verifiedItems.map((item) => ({
@@ -319,8 +331,14 @@ export class OrderService {
             },
           });
 
-          const isPaymentSuccess = paymentIntent.status === 'succeeded';
-          const isPaymentFailed = paymentIntent.status === 'failed';
+          // Payment simulation is strictly prohibited in production and requires explicit PAYMENT_MODE=mock flag.
+          // Otherwise, checkout NEVER marks order PAID immediately and leaves it PENDING until a verified webhook arrives.
+          const isSimulationAllowed =
+            process.env.PAYMENT_MODE === 'mock' &&
+            process.env.NODE_ENV !== 'production';
+
+          const isPaymentSuccess = isSimulationAllowed && paymentIntent.status === 'succeeded';
+          const isPaymentFailed = isSimulationAllowed && paymentIntent.status === 'failed';
 
           const paymentRecord = await tx.payment.create({
             data: {
@@ -339,7 +357,7 @@ export class OrderService {
 
           // If payment simulation succeeded immediately, mark order PAID
           if (isPaymentSuccess) {
-            validateOrderStatusTransition(order.status, OrderStatus.PAID, Role.ADMIN);
+            validateOrderStatusTransition(order.status, OrderStatus.PAID, systemActor('checkout_payment'));
             await tx.order.update({
               where: { id: order.id },
               data: { status: OrderStatus.PAID },
@@ -356,7 +374,7 @@ export class OrderService {
               },
             });
           } else if (isPaymentFailed) {
-            validateOrderStatusTransition(order.status, OrderStatus.CANCELLED, Role.ADMIN);
+            validateOrderStatusTransition(order.status, OrderStatus.CANCELLED, systemActor('checkout_payment_failed'));
             // Payment failure: restock exactly once and set order to CANCELLED
             for (const item of verifiedItems) {
               await tx.productVariant.update({
@@ -435,7 +453,7 @@ export class OrderService {
       return {
         order: {
           ...result.order,
-          shippingAddress: decryptAddressFields(result.order.shippingAddress as any),
+          shippingAddress: decryptOrderShippingAddress(result.order.shippingAddress),
           payments: result.paymentRecord ? [result.paymentRecord] : [],
         },
         paymentIntent: result.paymentIntent
@@ -466,7 +484,7 @@ export class OrderService {
           return {
             order: {
               ...existing,
-              shippingAddress: decryptAddressFields(existing.shippingAddress as any),
+              shippingAddress: decryptOrderShippingAddress(existing.shippingAddress),
               payments: existing.payments,
             },
             paymentIntent: null,
@@ -492,9 +510,8 @@ export class OrderService {
   async sharedCancelAndRestock(
     tx: Prisma.TransactionClient,
     orderId: string,
-    actorId: string,
-    note: string,
-    role: Role = Role.CUSTOMER
+    actor: Actor,
+    note: string
   ) {
     // 1. Lock the order row exclusively
     await tx.$queryRaw`SELECT id, status, "profileId" FROM orders WHERE id = ${orderId} FOR UPDATE`;
@@ -526,7 +543,7 @@ export class OrderService {
     }
 
     // 3. Central state machine validation
-    validateOrderStatusTransition(order.status, OrderStatus.CANCELLED, role);
+    validateOrderStatusTransition(order.status, OrderStatus.CANCELLED, actor);
 
     // 4. Restore inventory stock for each item in the order according to central restock rules
     if (shouldRestockOnTransition(order.status, OrderStatus.CANCELLED)) {
@@ -578,13 +595,15 @@ export class OrderService {
       },
     });
 
+    const changedBy = actor.kind === 'USER' ? actor.id : actor.name;
+
     // 7. Write OrderStatusHistory row
     await tx.orderStatusHistory.create({
       data: {
         orderId: order.id,
         fromStatus: previousStatus,
         toStatus: OrderStatus.CANCELLED,
-        changedBy: actorId,
+        changedBy,
         note,
       },
     });
@@ -592,7 +611,7 @@ export class OrderService {
     // 8. Audit log (strictly no plaintext notes or sensitive data in metadata)
     await logAuditEvent({
       tx,
-      actorId,
+      actor,
       action: 'ORDER_CANCELLED',
       entity: 'Order',
       entityId: order.id,
@@ -630,9 +649,8 @@ export class OrderService {
         const { order: cancelled } = await this.sharedCancelAndRestock(
           tx,
           orderId,
-          user.id,
-          'Customer cancelled order before processing',
-          user.role
+          userActor(user.id, user.role),
+          'Customer cancelled order before processing'
         );
         return cancelled;
       },
@@ -644,7 +662,7 @@ export class OrderService {
 
     return {
       ...updatedOrder,
-      shippingAddress: decryptAddressFields(updatedOrder.shippingAddress as any),
+      shippingAddress: decryptOrderShippingAddress(updatedOrder.shippingAddress),
     };
   }
 
@@ -768,7 +786,7 @@ export class OrderService {
 
         await logAuditEvent({
           tx,
-          actorId: adminUser.id,
+          actor: userActor(adminUser.id, adminUser.role),
           action,
           entity: 'Order',
           entityId: orderId,
@@ -789,7 +807,7 @@ export class OrderService {
 
     return {
       ...updatedOrder,
-      shippingAddress: decryptAddressFields(updatedOrder.shippingAddress as any),
+      shippingAddress: decryptOrderShippingAddress(updatedOrder.shippingAddress),
     };
   }
 
@@ -863,7 +881,7 @@ export class OrderService {
 
     const sanitizedOrders = orders.map((o) => ({
       ...o,
-      shippingAddress: decryptAddressFields(o.shippingAddress as any),
+      shippingAddress: decryptOrderShippingAddress(o.shippingAddress),
     }));
 
     return {
@@ -909,7 +927,7 @@ export class OrderService {
 
     return {
       ...order,
-      shippingAddress: decryptAddressFields(order.shippingAddress as any),
+      shippingAddress: decryptOrderShippingAddress(order.shippingAddress),
     };
   }
 
@@ -942,7 +960,7 @@ export class OrderService {
             await this.sharedCancelAndRestock(
               tx,
               order.id,
-              'system_scheduler',
+              systemActor('system_scheduler'),
               `Expired PENDING order cancelled automatically (older than ${olderThanMinutes} minutes)`
             );
           },
@@ -1097,7 +1115,7 @@ export class OrderService {
           });
 
           if (order.status === OrderStatus.PENDING) {
-            validateOrderStatusTransition(order.status, OrderStatus.PAID, Role.ADMIN);
+            validateOrderStatusTransition(order.status, OrderStatus.PAID, systemActor('payment_webhook'));
             await tx.order.update({
               where: { id: order.id },
               data: { status: OrderStatus.PAID },
@@ -1116,7 +1134,7 @@ export class OrderService {
 
           await logAuditEvent({
             tx,
-            actorId: order.profileId,
+            actor: systemActor('payment_webhook'),
             action: 'PAYMENT_CONFIRMED',
             entity: 'Order',
             entityId: order.id,
@@ -1154,9 +1172,8 @@ export class OrderService {
           const { order: cancelled, alreadyCancelled } = await this.sharedCancelAndRestock(
             tx,
             order.id,
-            'system_payment_webhook',
-            `Payment failed via webhook event ${event.id}`,
-            Role.ADMIN
+            systemActor('payment_webhook'),
+            `Payment failed via webhook event ${event.id}`
           );
 
           return {
@@ -1208,7 +1225,7 @@ export class OrderService {
 
     return {
       ...order,
-      shippingAddress: decryptAddressFields(order.shippingAddress as any),
+      shippingAddress: decryptOrderShippingAddress(order.shippingAddress),
     };
   }
 
@@ -1259,7 +1276,7 @@ export class OrderService {
 
     const decryptedOrders = orders.map((o) => ({
       ...o,
-      shippingAddress: decryptAddressFields(o.shippingAddress as any),
+      shippingAddress: decryptOrderShippingAddress(o.shippingAddress),
     }));
 
     return {

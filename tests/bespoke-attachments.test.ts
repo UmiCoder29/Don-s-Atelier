@@ -859,4 +859,119 @@ describe('Bespoke Custom Order Attachment Hardening', () => {
       uploadedStoragePaths.push(`custom-orders/${customerBId}/${obj.name}`);
     }
   }, 90000);
+
+  describe('Attachment Route Rollback vs Preservation (Step 4c)', () => {
+    it('Outcome 1: preserved when DB insert commits (storage object exists and is NOT deleted)', async () => {
+      const order = await prisma.customOrder.create({
+        data: {
+          orderNumber: `CO-COMMIT-${Date.now()}`,
+          profileId: customerAId,
+          description: 'Testing committed storage preservation',
+          status: CustomOrderStatus.SUBMITTED,
+        },
+      });
+      createdOrderIds.push(order.id);
+
+      const rawPath = `custom-orders/${customerAId}/commit-test-${Date.now()}.jpg`;
+      const buf = await createValidJpeg({ r: 40, g: 80, b: 120 });
+      await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .upload(rawPath, buf, { contentType: 'image/jpeg', upsert: true });
+      uploadedStoragePaths.push(rawPath);
+
+      const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}/attachments`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${customerAToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileName: 'committed-sample.jpg',
+          storagePath: rawPath,
+        }),
+      });
+
+      const res = await createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
+      expect(res.status).toBe(201);
+      const json = await res.json();
+      expect(json.success).toBe(true);
+      const sanitizedPath = json.data.storagePath;
+      uploadedStoragePaths.push(sanitizedPath);
+
+      // Verify the DB row exists
+      const dbRow = await prisma.customOrderAttachment.findUnique({
+        where: { id: json.data.id },
+      });
+      expect(dbRow).toBeDefined();
+
+      // Verify the sanitized object in storage is NOT deleted and exists
+      const sanitizedFileName = sanitizedPath.split('/').pop()!;
+      const { data: storageList } = await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .list(`custom-orders/${customerAId}`);
+      expect(storageList?.some((item) => item.name === sanitizedFileName)).toBe(true);
+    });
+
+    it('Outcome 2: deleted when DB insert fails to commit (sanitized object deleted from storage on error)', async () => {
+      // Create order already at 5 images cap
+      const order = await prisma.customOrder.create({
+        data: {
+          orderNumber: `CO-FAIL-${Date.now()}`,
+          profileId: customerAId,
+          description: 'Testing failed commit rollback',
+          status: CustomOrderStatus.SUBMITTED,
+        },
+      });
+      createdOrderIds.push(order.id);
+
+      // Pre-fill 5 attachments directly in DB
+      for (let i = 1; i <= 5; i++) {
+        await prisma.customOrderAttachment.create({
+          data: {
+            customOrderId: order.id,
+            fileName: `dummy-${i}.jpg`,
+            size: 1000,
+            mimeType: 'image/jpeg',
+            storagePath: `custom-orders/${customerAId}/dummy-${i}.jpg`,
+          },
+        });
+      }
+
+      // Upload raw file to storage
+      const rawPath = `custom-orders/${customerAId}/fail-test-${Date.now()}.jpg`;
+      const buf = await createValidJpeg({ r: 90, g: 90, b: 90 });
+      await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .upload(rawPath, buf, { contentType: 'image/jpeg', upsert: true });
+      uploadedStoragePaths.push(rawPath);
+
+      const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}/attachments`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${customerAToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          fileName: 'should-fail-rollback.jpg',
+          storagePath: rawPath,
+        }),
+      });
+
+      // 6th image must fail with 409 or 400 because max cap is 5
+      const res = await createAttachmentRoute(req, { params: Promise.resolve({ id: order.id }) });
+      expect([400, 409]).toContain(res.status);
+
+      // Assert that DB attachments remain exactly 5
+      const count = await prisma.customOrderAttachment.count({
+        where: { customOrderId: order.id },
+      });
+      expect(count).toBe(5);
+
+      // Assert that no new sanitized file remains in storage (storage object was cleaned up)
+      const { data: storageList } = await supabaseAdmin.storage
+        .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+        .list(`custom-orders/${customerAId}`);
+      expect(storageList?.some((item) => item.name.includes('fail-test'))).toBe(false);
+    });
+  });
 });

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import sharp from 'sharp';
 import { supabaseAdmin } from '@/lib/db/supabase';
+import { prisma } from '@/lib/db/prisma';
 import { STORAGE_BUCKETS } from '@/lib/storage/buckets';
 import { AuthenticatedUser, Role } from '@/lib/auth/supabase-auth';
 import { ForbiddenError, ValidationError, InternalServerError } from '@/lib/errors/api-error';
@@ -13,6 +14,12 @@ import {
 import { logger } from '@/lib/api/logger';
 
 export const MAX_CUSTOM_ORDER_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+
+interface StorageFileObjectMetadata {
+  size?: number;
+  contentLength?: number;
+  [key: string]: unknown;
+}
 
 /**
  * Strict path matching for bespoke custom order attachments:
@@ -108,8 +115,7 @@ export function sanitizeClientFileName(name: string | null | undefined, maxLengt
   }
 
   // 1. Strip null bytes and control characters (ASCII 0x00-0x1F and 0x7F-0x9F)
-  // eslint-disable-next-line no-control-regex
-  let sanitized = name.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+  let sanitized = name.replace(new RegExp('[\\x00-\\x1f\\x7f-\\x9f]', 'g'), '');
 
   // 2. Strip Unicode bidi and invisible characters:
   // U+200B-200F (zero-width & directional marks), U+202A-202E (bidi embeddings & overrides),
@@ -213,10 +219,11 @@ export async function revalidateAndSanitizeAttachment(
         });
       } else {
         const match = listData?.find((f) => f.name === fileName);
-        if (match?.metadata && typeof match.metadata.size === 'number' && match.metadata.size > 0) {
-          objectSize = match.metadata.size;
-        } else if (match?.metadata && typeof (match.metadata as any).contentLength === 'number' && (match.metadata as any).contentLength > 0) {
-          objectSize = (match.metadata as any).contentLength;
+        const meta = match?.metadata as StorageFileObjectMetadata | undefined;
+        if (meta && typeof meta.size === 'number' && meta.size > 0) {
+          objectSize = meta.size;
+        } else if (meta && typeof meta.contentLength === 'number' && meta.contentLength > 0) {
+          objectSize = meta.contentLength;
         }
       }
     } catch (err) {
@@ -409,3 +416,82 @@ export async function revalidateAndSanitizeAttachment(
     size: sanitizedBuffer.length,
   };
 }
+
+export interface OrphanedUploadInfo {
+  storagePath: string;
+  name: string;
+  createdAt: Date;
+  size?: number;
+}
+
+/**
+ * Scans the custom-order-uploads storage bucket and identifies orphaned objects
+ * older than N hours (default 24 hours) that have no corresponding attachment record
+ * in the database.
+ *
+ * NOTE: This function only LISTS orphaned storage objects for reporting/monitoring.
+ * It strictly performs NO deletion and has NO public route.
+ */
+export async function findOrphanedCustomOrderUploads(
+  options: {
+    olderThanHours?: number;
+    storageClient?: typeof supabaseAdmin;
+    dbClient?: typeof prisma;
+  } = {}
+): Promise<OrphanedUploadInfo[]> {
+  const olderThanHours = options.olderThanHours ?? 24;
+  const storage = options.storageClient ?? supabaseAdmin;
+  const db = options.dbClient ?? prisma;
+
+  const cutoff = new Date(Date.now() - olderThanHours * 60 * 60 * 1000);
+
+  // 1. Fetch all known attachment storage paths from the database
+  const attachments = await db.customOrderAttachment.findMany({
+    select: { storagePath: true },
+  });
+  const trackedPaths = new Set(attachments.map((a) => a.storagePath));
+
+  const orphaned: OrphanedUploadInfo[] = [];
+
+  // 2. List top-level folders under custom-orders/ in the private bucket
+  const { data: userFolders, error: folderError } = await storage.storage
+    .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+    .list('custom-orders', { limit: 1000 });
+
+  if (folderError || !userFolders) {
+    logger.warn('Could not list user folders in custom-order-uploads', { error: folderError?.message });
+    return [];
+  }
+
+  // 3. For each folder, list files and find unreferenced objects older than cutoff
+  for (const folder of userFolders) {
+    const folderPath = `custom-orders/${folder.name}`;
+    const { data: files, error: fileError } = await storage.storage
+      .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
+      .list(folderPath, { limit: 1000 });
+
+    if (fileError || !files) continue;
+
+    for (const file of files) {
+      if (!file.name) continue;
+      const fullPath = `${folderPath}/${file.name}`;
+
+      // Check if file is tracked in database
+      if (!trackedPaths.has(fullPath)) {
+        const fileCreatedAt = file.created_at ? new Date(file.created_at) : new Date(0);
+        if (fileCreatedAt < cutoff) {
+          const meta = file.metadata as StorageFileObjectMetadata | undefined;
+          orphaned.push({
+            storagePath: fullPath,
+            name: file.name,
+            createdAt: fileCreatedAt,
+            size: meta?.size ?? meta?.contentLength,
+          });
+        }
+      }
+    }
+  }
+
+  return orphaned;
+}
+

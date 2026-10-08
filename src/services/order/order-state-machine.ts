@@ -70,6 +70,8 @@ export const ORDER_TRANSITION_PERMISSIONS: Record<
   [OrderStatus.REFUNDED]: {},
 };
 
+import { Actor } from '@/lib/auth/actor';
+
 /**
  * Validates whether a proposed order status transition is permissible under the central state machine.
  * Throws ConflictError (409) if transition is illegal or order is terminal.
@@ -79,7 +81,7 @@ export const ORDER_TRANSITION_PERMISSIONS: Record<
 export function validateOrderStatusTransition(
   currentStatus: OrderStatus,
   targetStatus: OrderStatus,
-  role: Role
+  roleOrActor: Role | Actor
 ): void {
   // Idempotency: re-cancelling or re-refunding
   if (currentStatus === targetStatus) {
@@ -106,12 +108,29 @@ export function validateOrderStatusTransition(
     );
   }
 
-  // Role authorization check
-  const allowedRoles = ORDER_TRANSITION_PERMISSIONS[currentStatus]?.[targetStatus] || [];
-  if (!allowedRoles.includes(role)) {
-    throw new ForbiddenError(
-      `Role ${role} is not authorized to transition order from ${currentStatus} to ${targetStatus}`
+  // Actor / Role authorization check
+  if (typeof roleOrActor === 'object' && roleOrActor.kind === 'SYSTEM') {
+    const systemAllowedTransitions: Array<[OrderStatus, OrderStatus]> = [
+      [OrderStatus.PENDING, OrderStatus.PAID],
+      [OrderStatus.PENDING, OrderStatus.CANCELLED],
+      [OrderStatus.PAID, OrderStatus.CANCELLED],
+    ];
+    const isSystemAllowed = systemAllowedTransitions.some(
+      ([from, to]) => from === currentStatus && to === targetStatus
     );
+    if (!isSystemAllowed) {
+      throw new ForbiddenError(
+        `System process '${roleOrActor.name}' is not authorized to transition order from ${currentStatus} to ${targetStatus}`
+      );
+    }
+  } else {
+    const role = typeof roleOrActor === 'string' ? roleOrActor : roleOrActor.role;
+    const allowedRoles = ORDER_TRANSITION_PERMISSIONS[currentStatus]?.[targetStatus] || [];
+    if (!allowedRoles.includes(role)) {
+      throw new ForbiddenError(
+        `Role ${role} is not authorized to transition order from ${currentStatus} to ${targetStatus}`
+      );
+    }
   }
 }
 

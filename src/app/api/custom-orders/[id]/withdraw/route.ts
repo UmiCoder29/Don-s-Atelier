@@ -19,11 +19,15 @@ export const POST = withErrorHandler<RouteContext>(async (req: NextRequest, cont
   const { id } = customOrderIdParamSchema.parse(resolvedParams);
 
   let input: WithdrawCustomOrderInput | undefined;
+  let body: unknown;
   try {
-    const body = await req.json();
-    input = withdrawCustomOrderSchema.parse(body);
+    body = await req.json();
   } catch {
     // Body is optional for withdrawal
+  }
+
+  if (body !== undefined && body !== null) {
+    input = withdrawCustomOrderSchema.parse(body);
   }
 
   const withdrawnOrder = await bespokeService.withdrawCustomOrder(user, id, input);

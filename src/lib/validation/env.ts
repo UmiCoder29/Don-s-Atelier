@@ -41,6 +41,9 @@ export const envSchema = z.object({
     .string()
     .regex(/^\d{7,15}$/, 'WHATSAPP_BUSINESS_NUMBER must contain digits only with country code')
     .default('442079460999'),
+
+  // Payment Mode ('mock' for testing simulation, 'live' for real provider)
+  PAYMENT_MODE: z.enum(['mock', 'live']).optional().default('live'),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -85,6 +85,7 @@ export const POST = withErrorHandler<RouteContext>(async (req: NextRequest, cont
 
   // 2. Server-side re-validation and Sharp sanitization
   let sanitized: SanitizedAttachmentResult | null = null;
+  let dbCommitted = false;
   try {
     sanitized = await revalidateAndSanitizeAttachment(
       user,
@@ -125,6 +126,8 @@ export const POST = withErrorHandler<RouteContext>(async (req: NextRequest, cont
       }
     );
 
+    dbCommitted = true;
+
     await logAuditEventFromRequest(req, {
       actorId: user.id,
       action: 'CUSTOM_ORDER_ATTACHMENT_UPLOADED',
@@ -132,7 +135,7 @@ export const POST = withErrorHandler<RouteContext>(async (req: NextRequest, cont
       entityId: attachment.id,
       metadata: {
         customOrderId,
-        fileName: attachment.fileName,
+        objectName: attachment.storagePath,
         size: attachment.size,
         mimeType: attachment.mimeType,
         storagePath: attachment.storagePath,
@@ -141,9 +144,8 @@ export const POST = withErrorHandler<RouteContext>(async (req: NextRequest, cont
 
     return successResponse(attachment, requestId, {}, 201);
   } catch (err) {
-    // If database transaction failed (e.g. 5-image cap reached) or anything failed
-    // AFTER the sanitized object was uploaded, delete that sanitized object from storage.
-    if (sanitized?.storagePath) {
+    // Delete the sanitized storage object ONLY if the database insert did not commit.
+    if (sanitized?.storagePath && !dbCommitted) {
       try {
         const { error: removeErr } = await supabaseAdmin.storage
           .from(STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS)
