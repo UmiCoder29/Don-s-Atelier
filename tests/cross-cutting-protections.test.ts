@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
 import { NextRequest } from 'next/server';
 import { POST as registerRoute } from '@/app/api/auth/register/route';
 import { POST as loginRoute } from '@/app/api/auth/login/route';
-import { POST as checkoutRoute } from '@/app/api/orders/route';
+import { POST as checkoutRoute } from '@/app/api/checkout/route';
 import { POST as customOrderRoute } from '@/app/api/custom-orders/route';
 import { POST as cartRoute } from '@/app/api/cart/route';
 import { POST as uploadRoute } from '@/app/api/uploads/route';
@@ -136,12 +136,13 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       expect(body.error.code).toBe(ErrorCode.VALIDATION_ERROR);
     });
 
-    it('rejects extra fields on POST /api/orders (checkout) with 422', async () => {
-      const req = new NextRequest('http://localhost:3000/api/orders', {
+    it('rejects extra fields on POST /api/checkout with 422', async () => {
+      const req = new NextRequest('http://localhost:3000/api/checkout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${customerToken}`,
+          'Idempotency-Key': 'idemp-extra-fields-test',
         },
         body: JSON.stringify({
           addressId: customerAddressId,
@@ -149,7 +150,7 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
         }),
       });
 
-      const res = await checkoutRoute(req, {} as never);
+      const res = await checkoutRoute(req, { params: Promise.resolve({}) });
       expect(res.status).toBe(422);
 
       const body = await res.json();
@@ -375,16 +376,17 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       expect(body.error.message).toContain('Too many requests');
     });
 
-    it('rate-limits checkout route (POST /api/orders) per IP and per user', async () => {
+    it('rate-limits checkout route (POST /api/checkout) per IP and per user', async () => {
       rateLimiter.setRule('checkout', { maxRequests: 2, windowSeconds: 60 });
       const testIp = '203.0.113.88';
 
       const makeCheckoutRequest = (ip: string) => {
-        const req = new NextRequest('http://localhost:3000/api/orders', {
+        const req = new NextRequest('http://localhost:3000/api/checkout', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${customerToken}`,
+            'Idempotency-Key': 'idemp-rate-limit-test',
           },
           body: JSON.stringify({
             addressId: customerAddressId,
@@ -395,13 +397,13 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       };
 
       // 1st and 2nd pass rate limiter
-      const r1 = await checkoutRoute(makeCheckoutRequest(testIp), {} as never);
-      const r2 = await checkoutRoute(makeCheckoutRequest(testIp), {} as never);
+      const r1 = await checkoutRoute(makeCheckoutRequest(testIp), { params: Promise.resolve({}) });
+      const r2 = await checkoutRoute(makeCheckoutRequest(testIp), { params: Promise.resolve({}) });
       expect(r1.status).not.toBe(429);
       expect(r2.status).not.toBe(429);
 
       // 3rd is rejected with 429 + Retry-After
-      const r3 = await checkoutRoute(makeCheckoutRequest(testIp), {} as never);
+      const r3 = await checkoutRoute(makeCheckoutRequest(testIp), { params: Promise.resolve({}) });
       expect(r3.status).toBe(429);
       expect(r3.headers.get('Retry-After')).toBeDefined();
       const body = await r3.json();

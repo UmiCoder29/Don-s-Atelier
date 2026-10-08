@@ -20,14 +20,14 @@ import { STORAGE_BUCKETS } from '@/lib/storage/buckets';
 import { logger } from '@/lib/api/logger';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 const paramsSchema = z.object({
   id: uuidSchema,
 }).strict();
 
-export const uploadAttachmentSchema = z.object({
+const uploadAttachmentSchema = z.object({
   fileName: z
     .string()
     .min(1, 'File name is required')

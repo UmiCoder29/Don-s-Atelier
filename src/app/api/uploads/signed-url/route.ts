@@ -10,7 +10,7 @@ import { logAuditEventFromRequest } from '@/lib/audit/audit-logger';
 import { uuidSchema } from '@/lib/validation/zod-helpers';
 import { ForbiddenError } from '@/lib/errors/api-error';
 
-export const signedUrlRequestSchema = z
+const signedUrlRequestSchema = z
   .object({
     bucket: z.enum([STORAGE_BUCKETS.PRODUCT_IMAGES, STORAGE_BUCKETS.CUSTOM_ORDER_UPLOADS], {
       errorMap: () => ({
@@ -34,7 +34,7 @@ export const signedUrlRequestSchema = z
   })
   .strict();
 
-export type SignedUrlRequestInput = z.infer<typeof signedUrlRequestSchema>;
+type SignedUrlRequestInput = z.infer<typeof signedUrlRequestSchema>;
 
 /**
  * POST /api/uploads/signed-url

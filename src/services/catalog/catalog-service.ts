@@ -1,7 +1,8 @@
 import { prisma } from '@/lib/db/prisma';
-import { Prisma, ProductStatus } from '@prisma/client';
-import { NotFoundError, ConflictError, BadRequestError } from '@/lib/errors/api-error';
+import { Prisma, ProductStatus, Role } from '@prisma/client';
+import { NotFoundError, ConflictError, BadRequestError, ForbiddenError } from '@/lib/errors/api-error';
 import { AuthenticatedUser } from '@/lib/auth/supabase-auth';
+import { logAuditEvent } from '@/lib/audit/audit-logger';
 import {
   ListProductsQuery,
   PublicProductDto,
@@ -571,43 +572,177 @@ export class CatalogService {
   }
 
   /**
-   * Admin adjusts variant stock count (atomic adjustment or absolute set).
+   * Admin adjusts variant stock count under row-level lock (FOR UPDATE) within a transaction.
+   * Requires a non-empty reason string. Prevents stock from dropping below zero.
+   * Writes an immutable audit entry with before and after quantities and the reason.
    */
-  async adjustStock(_admin: AuthenticatedUser, variantId: string, input: AdjustStockInput) {
-    const existing = await prisma.productVariant.findUnique({ where: { id: variantId } });
-    if (!existing) {
-      throw new NotFoundError(`Variant '${variantId}'`);
+  async adjustStock(admin: AuthenticatedUser, variantId: string, input: AdjustStockInput) {
+    if (admin.role !== Role.ADMIN) {
+      throw new ForbiddenError('Only administrators can adjust inventory stock');
     }
 
-    let newStock: number;
-    if (input.adjustment !== undefined) {
-      newStock = existing.stockQuantity + input.adjustment;
-      if (newStock < 0) {
-        throw new BadRequestError(
-          `Stock adjustment (${input.adjustment}) would result in negative inventory (${newStock})`
-        );
-      }
-    } else if (input.stockQuantity !== undefined) {
-      newStock = input.stockQuantity;
-    } else {
-      throw new BadRequestError('Either adjustment or stockQuantity must be provided');
+    if (!input.reason || !input.reason.trim()) {
+      throw new BadRequestError('Reason is required for inventory adjustments');
     }
 
-    const updated = await prisma.productVariant.update({
-      where: { id: variantId },
-      data: {
-        stockQuantity: newStock,
+    const result = await prisma.$transaction(
+      async (tx) => {
+        // Exclusive row lock on the variant
+        const lockedRows = await tx.$queryRaw<
+          Array<{ id: string; stockQuantity: number; productId: string }>
+        >`
+          SELECT id, "stockQuantity", "productId"
+          FROM product_variants
+          WHERE id = ${variantId}
+          FOR UPDATE
+        `;
+
+        if (lockedRows.length === 0) {
+          throw new NotFoundError(`Variant '${variantId}'`);
+        }
+
+        const existing = lockedRows[0];
+        let newStock: number;
+        let delta: number;
+
+        if (input.adjustment !== undefined) {
+          delta = input.adjustment;
+          newStock = existing.stockQuantity + delta;
+          if (newStock < 0) {
+            throw new BadRequestError(
+              `Stock adjustment (${delta}) would result in negative inventory (${newStock})`
+            );
+          }
+        } else if (input.stockQuantity !== undefined) {
+          newStock = input.stockQuantity;
+          delta = newStock - existing.stockQuantity;
+        } else {
+          throw new BadRequestError('Either adjustment or stockQuantity must be provided');
+        }
+
+        const updated = await tx.productVariant.update({
+          where: { id: variantId },
+          data: {
+            stockQuantity: newStock,
+          },
+        });
+
+        // Write audit entry inside transaction
+        await logAuditEvent({
+          tx,
+          actorId: admin.id,
+          action: 'ADMIN_STOCK_ADJUSTED',
+          entity: 'ProductVariant',
+          entityId: variantId,
+          metadata: {
+            variantId,
+            previousStock: existing.stockQuantity,
+            newStock,
+            adjustment: delta,
+            reason: input.reason,
+          },
+        });
+
+        return {
+          variant: updated,
+          previousStock: existing.stockQuantity,
+          newStock,
+          adjustment: delta,
+          reason: input.reason,
+        };
       },
-    });
+      {
+        maxWait: 30000,
+        timeout: 60000,
+      }
+    );
+
+    return result;
+  }
+
+  /**
+   * Admin inventory view: lists variant stock with optional low-stock filter, search, and pagination.
+   */
+  async listInventory(
+    admin: AuthenticatedUser,
+    params: {
+      page?: number;
+      limit?: number;
+      lowStock?: boolean;
+      search?: string;
+    }
+  ) {
+    if (admin.role !== Role.ADMIN) {
+      throw new ForbiddenError('Only administrators can access inventory');
+    }
+
+    const page = Math.max(1, params.page || 1);
+    const limit = Math.min(100, Math.max(1, params.limit || 20));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ProductVariantWhereInput = {};
+
+    if (params.lowStock) {
+      where.stockQuantity = { lte: 3 };
+    }
+
+    if (params.search && params.search.trim()) {
+      const q = params.search.trim();
+      where.OR = [
+        { sku: { contains: q, mode: 'insensitive' } },
+        { size: { contains: q, mode: 'insensitive' } },
+        { color: { contains: q, mode: 'insensitive' } },
+        { product: { name: { contains: q, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [variants, totalCount] = await Promise.all([
+      prisma.productVariant.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ stockQuantity: 'asc' }, { sku: 'asc' }],
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              status: true,
+            },
+          },
+        },
+      }),
+      prisma.productVariant.count({ where }),
+    ]);
+
+    const formatted = variants.map((v) => ({
+      id: v.id,
+      productId: v.productId,
+      productName: v.product.name,
+      productSlug: v.product.slug,
+      sku: v.sku,
+      size: v.size,
+      color: v.color,
+      priceInCents: v.priceInCents,
+      stockQuantity: v.stockQuantity,
+      isLowStock: v.stockQuantity <= 3,
+      inStock: v.stockQuantity > 0,
+      active: v.active,
+      updatedAt: v.updatedAt,
+    }));
 
     return {
-      variant: updated,
-      previousStock: existing.stockQuantity,
-      newStock,
-      adjustment: input.adjustment,
-      reason: input.reason || 'Inventory adjustment',
+      variants: formatted,
+      pagination: {
+        page,
+        limit,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+      },
     };
   }
 }
 
 export const catalogService = new CatalogService();
+

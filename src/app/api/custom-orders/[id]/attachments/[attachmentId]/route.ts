@@ -12,7 +12,7 @@ import { STORAGE_BUCKETS } from '@/lib/storage/buckets';
 import { logAuditEventFromRequest } from '@/lib/audit/audit-logger';
 
 interface RouteContext {
-  params: Promise<{ id: string; attachmentId: string }> | { id: string; attachmentId: string };
+  params: Promise<{ id: string; attachmentId: string }>;
 }
 
 const paramsSchema = z

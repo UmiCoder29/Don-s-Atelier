@@ -2,12 +2,13 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db/prisma';
 import { createSupabaseUserClient } from '@/lib/db/supabase';
-import { POST as checkoutOrder, GET as listOrders } from '@/app/api/orders/route';
+import { GET as listOrders } from '@/app/api/orders/route';
+import { POST as checkoutOrder } from '@/app/api/checkout/route';
 import { GET as getOrderById } from '@/app/api/orders/[id]/route';
 import { ErrorCode } from '@/lib/errors/error-codes';
 import { rateLimiter } from '@/lib/security/rate-limiter';
 
-describe('Order & Checkout API Routes', () => {
+describe('Order & Checkout API Routes', { timeout: 60000 }, () => {
   beforeEach(() => {
     rateLimiter.reset();
   });
@@ -20,6 +21,7 @@ describe('Order & Checkout API Routes', () => {
   let customerAToken: string;
   let customerBToken: string;
   let adminToken: string;
+  let adminId: string;
   let customerAId: string;
   let customerAAddressId: string;
   let testVariantId: string;
@@ -52,6 +54,7 @@ describe('Order & Checkout API Routes', () => {
       password: adminPassword,
     });
     adminToken = authAdmin.session!.access_token;
+    adminId = authAdmin.user!.id;
 
     // 4. Select a variant for checkout test
     const variant = await prisma.productVariant.findFirst({
@@ -84,6 +87,7 @@ describe('Order & Checkout API Routes', () => {
 
   afterAll(async () => {
     if (createdOrderId) {
+      await prisma.auditLog.deleteMany({ where: { entityId: createdOrderId } }).catch(() => {});
       await prisma.orderStatusHistory.deleteMany({ where: { orderId: createdOrderId } }).catch(() => {});
       await prisma.payment.deleteMany({ where: { orderId: createdOrderId } }).catch(() => {});
       await prisma.orderItem.deleteMany({ where: { orderId: createdOrderId } }).catch(() => {});
@@ -105,18 +109,19 @@ describe('Order & Checkout API Routes', () => {
       await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
     }
 
-    const req = new NextRequest('http://localhost:3000/api/orders', {
+    const req = new NextRequest('http://localhost:3000/api/checkout', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${customerAToken}`,
         'Content-Type': 'application/json',
+        'Idempotency-Key': 'idemp-empty-cart-test',
       },
       body: JSON.stringify({
         addressId: customerAAddressId,
       }),
     });
 
-    const res = await checkoutOrder(req, {} as never);
+    const res = await checkoutOrder(req, { params: Promise.resolve({}) });
     expect(res.status).toBe(400);
 
     const body = await res.json();
@@ -145,11 +150,12 @@ describe('Order & Checkout API Routes', () => {
     initialStock = currentVariant!.stockQuantity;
 
     // 2. Execute checkout POST
-    const req = new NextRequest('http://localhost:3000/api/orders', {
+    const req = new NextRequest('http://localhost:3000/api/checkout', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${customerAToken}`,
         'Content-Type': 'application/json',
+        'Idempotency-Key': testIdempotencyKey,
       },
       // Note: Request body contains ZERO prices or totals!
       body: JSON.stringify({
@@ -158,7 +164,7 @@ describe('Order & Checkout API Routes', () => {
       }),
     });
 
-    const res = await checkoutOrder(req, {} as never);
+    const res = await checkoutOrder(req, { params: Promise.resolve({}) });
     expect(res.status).toBe(201);
 
     const body = await res.json();
@@ -192,11 +198,12 @@ describe('Order & Checkout API Routes', () => {
   });
 
   it('replays identical order on duplicate idempotencyKey', async () => {
-    const req = new NextRequest('http://localhost:3000/api/orders', {
+    const req = new NextRequest('http://localhost:3000/api/checkout', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${customerAToken}`,
         'Content-Type': 'application/json',
+        'Idempotency-Key': testIdempotencyKey,
       },
       body: JSON.stringify({
         addressId: customerAAddressId,
@@ -204,7 +211,7 @@ describe('Order & Checkout API Routes', () => {
       }),
     });
 
-    const res = await checkoutOrder(req, {} as never);
+    const res = await checkoutOrder(req, { params: Promise.resolve({}) });
     expect(res.status).toBe(201);
 
     const body = await res.json();
@@ -227,7 +234,10 @@ describe('Order & Checkout API Routes', () => {
     expect(body.error.code).toBe(ErrorCode.FORBIDDEN);
   });
 
-  it('allows Customer A to view their own order via /api/orders/[id]', async () => {
+  it('allows Customer A to view their own order via /api/orders/[id] and writes NO ADMIN_ORDER_VIEWED audit entry', async () => {
+    // Delete any previous audit entries for this order
+    await prisma.auditLog.deleteMany({ where: { entityId: createdOrderId } });
+
     const req = new NextRequest(`http://localhost:3000/api/orders/${createdOrderId}`, {
       headers: {
         'Authorization': `Bearer ${customerAToken}`,
@@ -240,9 +250,15 @@ describe('Order & Checkout API Routes', () => {
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(body.data.id).toBe(createdOrderId);
+
+    // Verify: owner opening their own order writes NO ADMIN_ORDER_VIEWED row
+    const ownerAudit = await prisma.auditLog.findFirst({
+      where: { entityId: createdOrderId, action: 'ADMIN_ORDER_VIEWED' },
+    });
+    expect(ownerAudit).toBeNull();
   });
 
-  it('allows ADMIN to view Customer A order via /api/orders/[id]', async () => {
+  it('allows ADMIN to view Customer A order via /api/orders/[id] and writes ADMIN_ORDER_VIEWED audit entry with no address text', async () => {
     const req = new NextRequest(`http://localhost:3000/api/orders/${createdOrderId}`, {
       headers: {
         'Authorization': `Bearer ${adminToken}`,
@@ -255,6 +271,29 @@ describe('Order & Checkout API Routes', () => {
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(body.data.id).toBe(createdOrderId);
+    // Response contains decrypted shipping address for admin
+    expect(body.data.shippingAddress).toBeDefined();
+    expect(body.data.shippingAddress.streetLine1 || body.data.shippingAddress.line1).toBe('10 Savile Row');
+
+    // Verify: admin viewing customer order writes ADMIN_ORDER_VIEWED audit row
+    const adminAudit = await prisma.auditLog.findFirst({
+      where: { entityId: createdOrderId, action: 'ADMIN_ORDER_VIEWED' },
+      orderBy: { timestamp: 'desc' },
+    });
+    expect(adminAudit).toBeDefined();
+    expect(adminAudit?.actorId).toBe(adminId);
+    const meta = adminAudit?.metadata as any;
+    expect(meta).toEqual({
+      adminId,
+      orderId: createdOrderId,
+    });
+
+    // Assert row contains zero address text
+    const fullLogString = JSON.stringify(adminAudit);
+    expect(fullLogString).not.toContain('10 Savile Row');
+    expect(fullLogString).not.toContain('Savile Row');
+    expect(fullLogString).not.toContain('Harrington');
+    expect(fullLogString).not.toContain('W1S 3PB');
   });
 
   it('lists orders isolated to authenticated customer on /api/orders', async () => {

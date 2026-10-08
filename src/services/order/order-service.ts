@@ -8,8 +8,8 @@ import { encryptAddressFields, decryptAddressFields } from '@/lib/crypto/field-e
 import { logAuditEvent } from '@/lib/audit/audit-logger';
 import { logger } from '@/lib/api/logger';
 import { paymentProvider as defaultPaymentProvider, PaymentProvider, WebhookEvent } from '@/services/payment';
-import { CheckoutInput, ListOrdersQuery } from './types';
-import { ShippingAddress } from '@/lib/validation/zod-helpers';
+import { CheckoutInput, ListOrdersQuery, ShippingAddress } from './types';
+import { validateOrderStatusTransition, shouldRestockOnTransition } from './order-state-machine';
 
 /**
  * Service managing customer checkout, server-side order calculation, and order tracking.
@@ -89,11 +89,11 @@ export class OrderService {
           },
           paymentIntent: existingOrder.payments[0]
             ? {
-                id: existingOrder.payments[0].providerRef,
-                clientSecret: `${existingOrder.payments[0].providerRef}_secret_replay`,
-                amountInCents: existingOrder.payments[0].amountInCents,
-                currency: existingOrder.payments[0].currency,
-              }
+              id: existingOrder.payments[0].providerRef,
+              clientSecret: `${existingOrder.payments[0].providerRef}_secret_replay`,
+              amountInCents: existingOrder.payments[0].amountInCents,
+              currency: existingOrder.payments[0].currency,
+            }
             : null,
           paymentRecord: existingOrder.payments[0] || null,
           idempotentReplay: true,
@@ -332,13 +332,14 @@ export class OrderService {
               status: isPaymentSuccess
                 ? PaymentStatus.SUCCEEDED
                 : isPaymentFailed
-                ? PaymentStatus.FAILED
-                : PaymentStatus.PENDING,
+                  ? PaymentStatus.FAILED
+                  : PaymentStatus.PENDING,
             },
           });
 
           // If payment simulation succeeded immediately, mark order PAID
           if (isPaymentSuccess) {
+            validateOrderStatusTransition(order.status, OrderStatus.PAID, Role.ADMIN);
             await tx.order.update({
               where: { id: order.id },
               data: { status: OrderStatus.PAID },
@@ -355,6 +356,7 @@ export class OrderService {
               },
             });
           } else if (isPaymentFailed) {
+            validateOrderStatusTransition(order.status, OrderStatus.CANCELLED, Role.ADMIN);
             // Payment failure: restock exactly once and set order to CANCELLED
             for (const item of verifiedItems) {
               await tx.productVariant.update({
@@ -438,11 +440,11 @@ export class OrderService {
         },
         paymentIntent: result.paymentIntent
           ? {
-              id: result.paymentIntent.id,
-              clientSecret: result.paymentIntent.clientSecret,
-              amountInCents: result.paymentIntent.amountInCents,
-              currency: result.paymentIntent.currency,
-            }
+            id: result.paymentIntent.id,
+            clientSecret: result.paymentIntent.clientSecret,
+            amountInCents: result.paymentIntent.amountInCents,
+            currency: result.paymentIntent.currency,
+          }
           : null,
         paymentRecord: result.paymentRecord,
         idempotentReplay: result.idempotentReplay,
@@ -491,7 +493,8 @@ export class OrderService {
     tx: Prisma.TransactionClient,
     orderId: string,
     actorId: string,
-    note: string
+    note: string,
+    role: Role = Role.CUSTOMER
   ) {
     // 1. Lock the order row exclusively
     await tx.$queryRaw`SELECT id, status, "profileId" FROM orders WHERE id = ${orderId} FOR UPDATE`;
@@ -514,7 +517,7 @@ export class OrderService {
       return { order, alreadyCancelled: true };
     }
 
-    // 3. Cancellation is allowed ONLY before PROCESSING (i.e. PENDING or PAID)
+    // Cancellation is allowed ONLY before PROCESSING (i.e. PENDING or PAID)
     const cancellableStatuses: OrderStatus[] = [OrderStatus.PENDING, OrderStatus.PAID];
     if (!cancellableStatuses.includes(order.status)) {
       throw new BadRequestError(
@@ -522,21 +525,26 @@ export class OrderService {
       );
     }
 
-    // 4. Restore inventory stock for each item in the order (sorted to prevent deadlocks)
-    const sortedItems = [...order.items].sort((a, b) =>
-      (a.productVariantId || '').localeCompare(b.productVariantId || '')
-    );
+    // 3. Central state machine validation
+    validateOrderStatusTransition(order.status, OrderStatus.CANCELLED, role);
 
-    for (const item of sortedItems) {
-      if (item.productVariantId) {
-        await tx.productVariant.update({
-          where: { id: item.productVariantId },
-          data: {
-            stockQuantity: {
-              increment: item.quantity,
+    // 4. Restore inventory stock for each item in the order according to central restock rules
+    if (shouldRestockOnTransition(order.status, OrderStatus.CANCELLED)) {
+      const sortedItems = [...order.items].sort((a, b) =>
+        (a.productVariantId || '').localeCompare(b.productVariantId || '')
+      );
+
+      for (const item of sortedItems) {
+        if (item.productVariantId) {
+          await tx.productVariant.update({
+            where: { id: item.productVariantId },
+            data: {
+              stockQuantity: {
+                increment: item.quantity,
+              },
             },
-          },
-        });
+          });
+        }
       }
     }
 
@@ -581,7 +589,7 @@ export class OrderService {
       },
     });
 
-    // 8. Audit log
+    // 8. Audit log (strictly no plaintext notes or sensitive data in metadata)
     await logAuditEvent({
       tx,
       actorId,
@@ -592,7 +600,6 @@ export class OrderService {
         orderNumber: order.orderNumber,
         previousStatus,
         restoredItemsCount: order.items.length,
-        note,
       },
     });
 
@@ -624,7 +631,8 @@ export class OrderService {
           tx,
           orderId,
           user.id,
-          'Customer cancelled order before processing'
+          'Customer cancelled order before processing',
+          user.role
         );
         return cancelled;
       },
@@ -641,86 +649,267 @@ export class OrderService {
   }
 
   /**
-   * Updates an order's status. Restricted to atelier administrators.
-   * If status is CANCELLED, invokes the identical shared restock function under row lock.
+   * Admin updates an order's status through the central order state machine.
+   * - Enforces row lock (FOR UPDATE) within a transaction.
+   * - Validates status transition through validateOrderStatusTransition.
+   * - Restocks inventory on CANCELLED or REFUNDED exactly once (idempotent: subsequent cancel/refund does not double restock).
+   * - Refund records payment status only, never calling payment providers or storing card data.
+   * - Every change writes OrderStatusHistory and AuditLog inside the transaction.
    */
-  async updateOrderStatus(user: AuthenticatedUser, orderId: string, newStatus: OrderStatus) {
-    if (user.role !== Role.ADMIN) {
+  async adminUpdateOrderStatus(
+    adminUser: AuthenticatedUser,
+    orderId: string,
+    newStatus: OrderStatus,
+    note?: string
+  ) {
+    if (adminUser.role !== Role.ADMIN) {
       throw new ForbiddenError('Only atelier administrators may advance order fulfillment status');
     }
 
-    if (newStatus === OrderStatus.CANCELLED) {
-      const updatedOrder = await prisma.$transaction(
-        async (tx) => {
-          const { order: cancelled } = await this.sharedCancelAndRestock(
-            tx,
-            orderId,
-            user.id,
-            'Administrator cancelled order'
-          );
-          return cancelled;
-        },
-        {
-          maxWait: 15000,
-          timeout: 30000,
-        }
-      );
-
-      return {
-        ...updatedOrder,
-        shippingAddress: decryptAddressFields(updatedOrder.shippingAddress as any),
-      };
-    }
-
-    const updated = await prisma.$transaction(
+    const updatedOrder = await prisma.$transaction(
       async (tx) => {
-        const order = await tx.order.findUnique({
-          where: { id: orderId },
-        });
-        if (!order) {
+        // 1. Lock the order row exclusively
+        const lockedRows = await tx.$queryRaw<
+          Array<{ id: string; status: OrderStatus; profileId: string }>
+        >`
+          SELECT id, status, "profileId" FROM orders WHERE id = ${orderId} FOR UPDATE
+        `;
+
+        if (lockedRows.length === 0) {
           throw new NotFoundError('Order');
         }
 
-        const previousStatus = order.status;
-        const res = await tx.order.update({
+        const current = lockedRows[0];
+
+        // 2. Validate transition through central order state machine
+        validateOrderStatusTransition(current.status, newStatus, adminUser.role);
+
+        // Required reason enforcement when moving PENDING to PAID
+        if (current.status === OrderStatus.PENDING && newStatus === OrderStatus.PAID) {
+          if (!note || !note.trim()) {
+            throw new BadRequestError('Reason is required when manually moving order from PENDING to PAID');
+          }
+        }
+
+        // 3. Idempotent check: if target status matches current status (e.g. repeated cancel or refund)
+        if (current.status === newStatus) {
+          const existing = await tx.order.findUnique({
+            where: { id: orderId },
+            include: { items: true, payments: true, statusHistory: true },
+          });
+          return existing!;
+        }
+
+        // Restock inventory based on central restock rules:
+        // - CANCELLED: restocks from any valid pre-cancellation state (PENDING, PAID, PROCESSING)
+        // - REFUNDED: restocks ONLY if previous status was PAID or PROCESSING.
+        //   REFUNDED from SHIPPED or DELIVERED must NOT restock.
+        const mustRestock = shouldRestockOnTransition(current.status, newStatus);
+
+        if (mustRestock) {
+          const items = await tx.orderItem.findMany({
+            where: { orderId },
+          });
+
+          // Sort variants to avoid deadlocks
+          const sortedItems = [...items].sort((a, b) =>
+            (a.productVariantId || '').localeCompare(b.productVariantId || '')
+          );
+
+          for (const item of sortedItems) {
+            if (item.productVariantId) {
+              await tx.productVariant.update({
+                where: { id: item.productVariantId },
+                data: {
+                  stockQuantity: {
+                    increment: item.quantity,
+                  },
+                },
+              });
+            }
+          }
+        }
+
+        // If refund, record payment status as REFUNDED in DB without invoking payment provider
+        if (newStatus === OrderStatus.REFUNDED) {
+          await tx.payment.updateMany({
+            where: { orderId, status: PaymentStatus.SUCCEEDED },
+            data: { status: PaymentStatus.REFUNDED },
+          });
+        }
+
+        // 4. Update order status
+        const order = await tx.order.update({
           where: { id: orderId },
           data: { status: newStatus },
-          include: { items: true, payments: true },
+          include: { items: true, payments: true, statusHistory: true },
         });
 
+        const historyNote = note || `Status updated to ${newStatus} by administrator`;
+
+        // 5. Write OrderStatusHistory row
         await tx.orderStatusHistory.create({
           data: {
             orderId,
-            fromStatus: previousStatus,
+            fromStatus: current.status,
             toStatus: newStatus,
-            changedBy: user.id,
-            note: `Status updated by administrator to ${newStatus}`,
+            changedBy: adminUser.id,
+            note: historyNote,
           },
         });
+
+        // 6. Write AuditLog row (strictly no plaintext sensitive data in metadata)
+        const action =
+          newStatus === OrderStatus.CANCELLED
+            ? 'ORDER_CANCELLED'
+            : newStatus === OrderStatus.REFUNDED
+              ? 'ORDER_REFUNDED'
+              : 'ORDER_STATUS_UPDATED';
 
         await logAuditEvent({
           tx,
-          actorId: user.id,
-          action: 'ORDER_STATUS_UPDATED',
+          actorId: adminUser.id,
+          action,
           entity: 'Order',
           entityId: orderId,
           metadata: {
-            previousStatus,
+            previousStatus: current.status,
             newStatus,
+            ...(note ? { reason: note } : {}),
           },
         });
 
-        return res;
+        return order;
       },
       {
-        maxWait: 15000,
-        timeout: 30000,
+        maxWait: 30000,
+        timeout: 60000,
       }
     );
 
     return {
-      ...updated,
-      shippingAddress: decryptAddressFields(updated.shippingAddress as any),
+      ...updatedOrder,
+      shippingAddress: decryptAddressFields(updatedOrder.shippingAddress as any),
+    };
+  }
+
+  /**
+   * Lists orders for atelier administrators with filters, search, and pagination.
+   * Encrypted fields (address, phone) are never searched.
+   */
+  async adminListOrders(
+    adminUser: AuthenticatedUser,
+    params: {
+      page?: number;
+      limit?: number;
+      status?: OrderStatus;
+      startDate?: Date | string;
+      endDate?: Date | string;
+      search?: string;
+    }
+  ) {
+    if (adminUser.role !== Role.ADMIN) {
+      throw new ForbiddenError('Only administrators can access this resource');
+    }
+
+    const page = Math.max(1, params.page || 1);
+    const limit = Math.min(100, Math.max(1, params.limit || 20));
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.OrderWhereInput = {};
+
+    if (params.status) {
+      where.status = params.status;
+    }
+
+    if (params.startDate || params.endDate) {
+      where.createdAt = {};
+      if (params.startDate) {
+        where.createdAt.gte = new Date(params.startDate);
+      }
+      if (params.endDate) {
+        where.createdAt.lte = new Date(params.endDate);
+      }
+    }
+
+    if (params.search && params.search.trim()) {
+      const q = params.search.trim();
+      where.OR = [
+        { orderNumber: { contains: q, mode: 'insensitive' } },
+        { profile: { email: { contains: q, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [orders, totalCount] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          profile: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+            },
+          },
+          items: true,
+          payments: true,
+        },
+      }),
+      prisma.order.count({ where }),
+    ]);
+
+    const sanitizedOrders = orders.map((o) => ({
+      ...o,
+      shippingAddress: decryptAddressFields(o.shippingAddress as any),
+    }));
+
+    return {
+      orders: sanitizedOrders,
+      pagination: {
+        page,
+        limit,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+      },
+    };
+  }
+
+  /**
+   * Retrieves full details for a single order by ID for administrators.
+   */
+  async adminGetOrderById(adminUser: AuthenticatedUser, orderId: string) {
+    if (adminUser.role !== Role.ADMIN) {
+      throw new ForbiddenError('Only administrators can access this resource');
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        profile: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+          },
+        },
+        items: true,
+        payments: true,
+        statusHistory: {
+          orderBy: { timestamp: 'asc' },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundError('Order');
+    }
+
+    return {
+      ...order,
+      shippingAddress: decryptAddressFields(order.shippingAddress as any),
     };
   }
 
@@ -908,6 +1097,7 @@ export class OrderService {
           });
 
           if (order.status === OrderStatus.PENDING) {
+            validateOrderStatusTransition(order.status, OrderStatus.PAID, Role.ADMIN);
             await tx.order.update({
               where: { id: order.id },
               data: { status: OrderStatus.PAID },
@@ -965,7 +1155,8 @@ export class OrderService {
             tx,
             order.id,
             'system_payment_webhook',
-            `Payment failed via webhook event ${event.id}`
+            `Payment failed via webhook event ${event.id}`,
+            Role.ADMIN
           );
 
           return {

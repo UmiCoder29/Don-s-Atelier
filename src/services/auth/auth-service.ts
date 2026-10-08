@@ -370,37 +370,81 @@ export class AuthService {
 
   /**
    * Allows an existing ADMIN to promote or change a user's role.
-   * Admin role can strictly ONLY be assigned by another admin.
+   * Rules:
+   * - Cannot change own role.
+   * - At least one ADMIN must always remain (enforced under row-level lock in transaction).
+   * - Audit logged with fromRole and toRole.
    */
-  async setUserRole(adminUser: AuthenticatedUser, targetUserId: string, input: UpdateRoleInput) {
+  async setUserRole(
+    adminUser: AuthenticatedUser,
+    targetUserId: string,
+    input: UpdateRoleInput,
+    clientMeta?: { ip?: string | null; userAgent?: string | null }
+  ) {
     if (adminUser.role !== Role.ADMIN) {
       throw new ForbiddenError('Only administrators can modify user roles');
     }
 
-    const targetProfile = await prisma.profile.findUnique({
-      where: { id: targetUserId },
-    });
-
-    if (!targetProfile) {
-      throw new NotFoundError('User profile');
+    // Rule: Cannot change own role
+    if (adminUser.id === targetUserId) {
+      throw new ConflictError('Administrators cannot modify their own role');
     }
 
-    const updated = await prisma.profile.update({
-      where: { id: targetUserId },
-      data: { role: input.role },
-    });
+    const updated = await prisma.$transaction(
+      async (tx) => {
+        // Always lock all admin profiles in deterministic sorted order to prevent deadlocks
+        // and serialize concurrent role updates
+        const adminRows = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id FROM profiles WHERE role = 'ADMIN' ORDER BY id FOR UPDATE
+        `;
 
-    await logAuditEvent({
-      actorId: adminUser.id,
-      action: 'USER_ROLE_UPDATED',
-      entity: 'Profile',
-      entityId: targetUserId,
-      metadata: {
-        previousRole: targetProfile.role,
-        newRole: input.role,
-        updatedBy: adminUser.id,
+        // Lock target profile row
+        const targetRows = await tx.$queryRaw<Array<{ id: string; role: Role }>>`
+          SELECT id, role FROM profiles WHERE id = ${targetUserId} FOR UPDATE
+        `;
+
+        if (targetRows.length === 0) {
+          throw new NotFoundError('User profile');
+        }
+
+        const targetProfile = targetRows[0];
+
+        // Rule: At least one ADMIN must always remain
+        if (targetProfile.role === Role.ADMIN && input.role !== Role.ADMIN) {
+          if (adminRows.length <= 1) {
+            throw new ConflictError(
+              'Cannot demote the last remaining administrator in the system'
+            );
+          }
+        }
+
+        const updatedProfile = await tx.profile.update({
+          where: { id: targetUserId },
+          data: { role: input.role },
+        });
+
+        await logAuditEvent({
+          tx,
+          actorId: adminUser.id,
+          action: 'ADMIN_ROLE_UPDATED',
+          entity: 'Profile',
+          entityId: targetUserId,
+          metadata: {
+            targetUserId,
+            fromRole: targetProfile.role,
+            toRole: input.role,
+          },
+          ip: clientMeta?.ip,
+          userAgent: clientMeta?.userAgent,
+        });
+
+        return updatedProfile;
       },
-    });
+      {
+        maxWait: 30000,
+        timeout: 60000,
+      }
+    );
 
     return {
       id: updated.id,

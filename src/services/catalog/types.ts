@@ -139,12 +139,44 @@ export const updateVariantSchema = z.object({
 
 export type UpdateVariantInput = z.infer<typeof updateVariantSchema>;
 
-export const adjustStockSchema = z.object({
-  adjustment: z.number().int().optional(),
-  stockQuantity: z.number().int().min(0, 'Stock quantity cannot be negative').optional(),
-  reason: z.string().max(255).transform(sanitizeText).optional(),
-}).strict().refine((data) => data.adjustment !== undefined || data.stockQuantity !== undefined, {
-  message: 'Either adjustment (delta) or stockQuantity (absolute) must be provided',
-});
+export const adjustStockSchema = z
+  .object({
+    adjustment: z
+      .number()
+      .int()
+      .min(-10000, 'Adjustment delta cannot be less than -10,000')
+      .max(10000, 'Adjustment delta cannot exceed 10,000')
+      .refine((v) => v !== 0, 'Adjustment delta cannot be zero')
+      .optional(),
+    stockQuantity: z
+      .number()
+      .int()
+      .min(0, 'Stock quantity cannot be negative')
+      .max(100000, 'Stock quantity cannot exceed 100,000')
+      .optional(),
+    reason: z
+      .string()
+      .min(1, 'Reason is required for inventory adjustment')
+      .max(255)
+      .transform(sanitizeText),
+  })
+  .strict()
+  .refine((data) => data.adjustment !== undefined || data.stockQuantity !== undefined, {
+    message: 'Either adjustment (delta) or stockQuantity (absolute) must be provided',
+  });
 
 export type AdjustStockInput = z.infer<typeof adjustStockSchema>;
+
+export const listInventoryQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).default(1).optional(),
+    limit: z.coerce.number().int().min(1).max(100, 'Page size cannot exceed 100').default(20).optional(),
+    lowStock: z
+      .union([z.boolean(), z.enum(['true', 'false']).transform((v) => v === 'true')])
+      .optional(),
+    search: z.string().max(100).optional(),
+  })
+  .strict();
+
+export type ListInventoryQuery = z.infer<typeof listInventoryQuerySchema>;
+

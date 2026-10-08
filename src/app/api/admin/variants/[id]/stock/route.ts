@@ -4,10 +4,9 @@ import { successResponse } from '@/lib/api/response';
 import { requireRole } from '@/lib/auth/supabase-auth';
 import { catalogService } from '@/services/catalog/catalog-service';
 import { variantIdParamSchema, adjustStockSchema } from '@/services/catalog/types';
-import { logAuditEventFromRequest } from '@/lib/audit/audit-logger';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**
@@ -26,29 +25,13 @@ async function handleStockAdjustment(req: NextRequest, context: RouteContext, re
 
   const result = await catalogService.adjustStock(adminUser, id, input);
 
-  await logAuditEventFromRequest(req, {
-    actorId: adminUser.id,
-    action: 'ADMIN_STOCK_ADJUSTED',
-    entity: 'ProductVariant',
-    entityId: id,
-    metadata: {
-      variantId: id,
-      previousStock: result.previousStock,
-      newStock: result.newStock,
-      adjustment: result.adjustment,
-      reason: result.reason,
-    },
-  });
-
   return successResponse(result, requestId);
 }
 
 /**
  * POST /api/admin/variants/[id]/stock
+ * Adjust inventory stock for a product variant (delta or absolute).
+ * Strictly requires non-empty reason, validates bounds, acquires FOR UPDATE row lock,
+ * prevents negative inventory, and writes before/after stock to audit log.
  */
 export const POST = withErrorHandler<RouteContext>(handleStockAdjustment);
-
-/**
- * PATCH /api/admin/variants/[id]/stock
- */
-export const PATCH = withErrorHandler<RouteContext>(handleStockAdjustment);

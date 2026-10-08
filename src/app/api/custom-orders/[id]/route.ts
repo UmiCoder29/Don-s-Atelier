@@ -6,7 +6,7 @@ import { bespokeService } from '@/services/bespoke/bespoke-service';
 import { customOrderIdParamSchema, customerEditCustomOrderSchema } from '@/services/bespoke/types';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**

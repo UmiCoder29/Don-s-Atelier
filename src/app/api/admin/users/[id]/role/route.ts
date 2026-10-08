@@ -3,13 +3,13 @@ import { z } from 'zod';
 import { withErrorHandler } from '@/lib/api/async-handler';
 import { successResponse } from '@/lib/api/response';
 import { requireRole } from '@/lib/auth/supabase-auth';
+import { extractClientMetadata } from '@/lib/audit/audit-logger';
 import { authService } from '@/services/auth/auth-service';
 import { updateRoleSchema } from '@/lib/validation/auth-schemas';
 import { uuidSchema } from '@/lib/validation/zod-helpers';
-import { logAuditEventFromRequest } from '@/lib/audit/audit-logger';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 const paramsSchema = z.object({
@@ -29,19 +29,8 @@ export const PATCH = withErrorHandler<RouteContext>(async (req: NextRequest, con
   const body = await req.json();
   const input = updateRoleSchema.parse(body);
 
-  const updatedUser = await authService.setUserRole(adminUser, id, input);
-
-  // Record audit log for admin write
-  await logAuditEventFromRequest(req, {
-    actorId: adminUser.id,
-    action: 'ADMIN_ROLE_UPDATED',
-    entity: 'Profile',
-    entityId: id,
-    metadata: {
-      newRole: input.role,
-      assignedByAdminId: adminUser.id,
-    },
-  });
+  const clientMeta = extractClientMetadata(req);
+  const updatedUser = await authService.setUserRole(adminUser, id, input, clientMeta);
 
   return successResponse(updatedUser, requestId);
 });

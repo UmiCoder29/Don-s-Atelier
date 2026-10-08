@@ -16,7 +16,7 @@ const EXTENSION_MAP: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-export const initiateUploadSchema = z
+const initiateUploadSchema = z
   .object({
     fileName: z
       .string()
@@ -37,7 +37,7 @@ export const initiateUploadSchema = z
   })
   .strict();
 
-export type InitiateUploadInput = z.infer<typeof initiateUploadSchema>;
+type InitiateUploadInput = z.infer<typeof initiateUploadSchema>;
 
 /**
  * POST /api/uploads

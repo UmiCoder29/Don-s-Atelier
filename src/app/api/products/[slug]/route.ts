@@ -5,7 +5,7 @@ import { catalogService } from '@/services/catalog/catalog-service';
 import { productSlugParamSchema } from '@/services/catalog/types';
 
 interface RouteContext {
-  params: Promise<{ slug: string }> | { slug: string };
+  params: Promise<{ slug: string }>;
 }
 
 /**

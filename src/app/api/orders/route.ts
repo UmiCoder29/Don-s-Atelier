@@ -3,7 +3,7 @@ import { withErrorHandler } from '@/lib/api/async-handler';
 import { successResponse } from '@/lib/api/response';
 import { requireAuth } from '@/lib/auth/supabase-auth';
 import { orderService } from '@/services/order/order-service';
-import { checkoutSchema, listOrdersQuerySchema } from '@/services/order/types';
+import { listOrdersQuerySchema } from '@/services/order/types';
 import { OrderStatus } from '@prisma/client';
 
 /**
@@ -23,17 +23,4 @@ export const GET = withErrorHandler(async (req: NextRequest, _context, requestId
 
   const result = await orderService.listOrders(user, query);
   return successResponse(result.orders, requestId, { pagination: result.pagination });
-});
-
-/**
- * POST /api/orders
- * Executes checkout: computes totals strictly from DB, decrements stock, creates order & payment intent.
- */
-export const POST = withErrorHandler(async (req: NextRequest, _context, requestId) => {
-  const user = await requireAuth(req);
-  const body = await req.json();
-  const input = checkoutSchema.parse(body);
-
-  const result = await orderService.checkout(user, input);
-  return successResponse(result, requestId, {}, 201);
 });

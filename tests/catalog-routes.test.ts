@@ -548,7 +548,10 @@ describe('Catalog API Routes & Services (Public & Admin)', () => {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${adminToken}`,
         },
-        body: JSON.stringify({ adjustment: -100 }), // Current stock is 30, -100 would be -70
+        body: JSON.stringify({
+          adjustment: -100,
+          reason: 'Inventory write-off test',
+        }), // Current stock is 30, -100 would be -70
       });
       const negRes = await adjustAdminStock(negReq, { params: Promise.resolve({ id: createdVariantId }) });
       expect(negRes.status).toBe(400);

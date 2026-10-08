@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { paginationSchema, uuidSchema } from '@/lib/validation/zod-helpers';
 import { OrderStatus } from '@prisma/client';
+export { shippingAddressSchema, type ShippingAddress } from '@/lib/validation/zod-helpers';
 
 /**
  * Checkout request schema.
@@ -27,8 +28,46 @@ export const orderIdParamSchema = z.object({
   id: uuidSchema,
 }).strict();
 
-export const updateOrderStatusSchema = z.object({
-  status: z.nativeEnum(OrderStatus),
+export const adminListOrdersQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100, 'Page size cannot exceed 100').default(20).optional(),
+  status: z.nativeEnum(OrderStatus).optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
+  search: z.string().max(100).optional(),
 }).strict();
 
-export type UpdateOrderStatusInput = z.infer<typeof updateOrderStatusSchema>;
+export type AdminListOrdersQuery = z.infer<typeof adminListOrdersQuerySchema>;
+
+export const adminUpdateOrderStatusSchema = z
+  .object({
+    status: z.nativeEnum(OrderStatus),
+    reason: z
+      .string()
+      .trim()
+      .min(1, 'Reason cannot be empty')
+      .max(500, 'Reason cannot exceed 500 characters')
+      .optional(),
+    note: z
+      .string()
+      .trim()
+      .max(500, 'Note cannot exceed 500 characters')
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (data) => {
+      if (data.status === OrderStatus.PAID) {
+        const effectiveReason = (data.reason || data.note || '').trim();
+        return effectiveReason.length > 0;
+      }
+      return true;
+    },
+    {
+      message: 'Reason is required when moving order to PAID',
+      path: ['reason'],
+    }
+  );
+
+export type AdminUpdateOrderStatusInput = z.infer<typeof adminUpdateOrderStatusSchema>;
+

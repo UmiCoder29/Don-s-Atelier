@@ -8,7 +8,7 @@ import { logAuditEventFromRequest } from '@/lib/audit/audit-logger';
 import { prisma } from '@/lib/db/prisma';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**

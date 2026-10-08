@@ -4,7 +4,8 @@ import { prisma } from '@/lib/db/prisma';
 import { createSupabaseUserClient } from '@/lib/db/supabase';
 import { POST as checkoutRoute } from '@/app/api/checkout/route';
 import { POST as cancelOrderRoute } from '@/app/api/orders/[id]/cancel/route';
-import { GET as getOrderById, PATCH as patchOrderRoute } from '@/app/api/orders/[id]/route';
+import { GET as getOrderById } from '@/app/api/orders/[id]/route';
+import { PATCH as adminPatchOrderRoute } from '@/app/api/admin/orders/[id]/route';
 import { GET as listOrders } from '@/app/api/orders/route';
 import { POST as webhookRoute } from '@/app/api/webhooks/payments/route';
 import { paymentProvider, MockStripePaymentProvider, DEFAULT_WEBHOOK_SECRET } from '@/services/payment';
@@ -829,8 +830,19 @@ describe('Checkout, Concurrency Hardening & Webhook Confirmation Suite', { timeo
       const orderId = checkoutBody.data.order.id;
       createdOrderIds.push(orderId);
 
-      // 2. Admin advances order to PROCESSING
-      const adminPatchReq = new NextRequest(`http://localhost:3000/api/orders/${orderId}`, {
+      // 2. Admin advances order from PENDING to PAID, then to PROCESSING
+      const adminPaidReq = new NextRequest(`http://localhost:3000/api/admin/orders/${orderId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: OrderStatus.PAID, reason: 'Manual payment verification' }),
+      });
+      const paidRes = await adminPatchOrderRoute(adminPaidReq, { params: Promise.resolve({ id: orderId }) });
+      expect(paidRes.status).toBe(200);
+
+      const adminPatchReq = new NextRequest(`http://localhost:3000/api/admin/orders/${orderId}`, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${adminToken}`,
@@ -839,7 +851,7 @@ describe('Checkout, Concurrency Hardening & Webhook Confirmation Suite', { timeo
         body: JSON.stringify({ status: OrderStatus.PROCESSING }),
       });
 
-      const patchRes = await patchOrderRoute(adminPatchReq, { params: Promise.resolve({ id: orderId }) });
+      const patchRes = await adminPatchOrderRoute(adminPatchReq, { params: Promise.resolve({ id: orderId }) });
       expect(patchRes.status).toBe(200);
 
       // 3. Customer attempts to cancel order -> Must be REJECTED!

@@ -7,7 +7,7 @@ import { productIdParamSchema } from '@/services/catalog/types';
 import { logAuditEventFromRequest } from '@/lib/audit/audit-logger';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**

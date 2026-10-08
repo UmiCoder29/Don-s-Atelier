@@ -8,7 +8,8 @@ import { POST as loginRoute } from '@/app/api/auth/login/route';
 import { PATCH as updateProfileRoute, GET as getProfileRoute } from '@/app/api/account/profile/route';
 import { PATCH as updateRoleRoute } from '@/app/api/admin/users/[id]/role/route';
 import { POST as logoutRoute } from '@/app/api/auth/logout/route';
-import { POST as ordersRoute, GET as getOrderRoute } from '@/app/api/orders/route';
+import { GET as getOrderRoute } from '@/app/api/orders/route';
+import { POST as ordersRoute } from '@/app/api/checkout/route';
 import { GET as getSingleOrderRoute } from '@/app/api/orders/[id]/route';
 import { POST as customOrdersRoute } from '@/app/api/custom-orders/route';
 import { GET as getSingleCustomOrderRoute } from '@/app/api/custom-orders/[id]/route';
@@ -481,11 +482,12 @@ describe("Don's Atelier - Security Hardening Layer Verification Pass", () => {
         },
       });
 
-      const orderReq = new NextRequest('http://localhost:3000/api/orders', {
+      const orderReq = new NextRequest('http://localhost:3000/api/checkout', {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${customerToken}`,
+          'idempotency-key': 'idemp-hardening-order-1',
         },
         body: JSON.stringify({
           addressId: createdAddress.id,

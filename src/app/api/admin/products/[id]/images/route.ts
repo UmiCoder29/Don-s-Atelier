@@ -10,7 +10,7 @@ import { productIdParamSchema } from '@/services/catalog/types';
 import { sanitizeText } from '@/lib/validation/sanitizer';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 const jsonImageUploadSchema = z

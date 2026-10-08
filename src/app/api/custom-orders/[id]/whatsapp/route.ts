@@ -7,7 +7,7 @@ import { customOrderIdParamSchema } from '@/services/bespoke/types';
 import { generateWhatsAppHandoffUrl } from '@/services/bespoke/whatsapp-handoff';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**

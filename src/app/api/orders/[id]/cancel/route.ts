@@ -6,7 +6,7 @@ import { orderService } from '@/services/order/order-service';
 import { orderIdParamSchema } from '@/services/order/types';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**

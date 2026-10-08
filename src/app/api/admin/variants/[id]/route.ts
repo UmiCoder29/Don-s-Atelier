@@ -9,7 +9,7 @@ import { prisma } from '@/lib/db/prisma';
 import { NotFoundError } from '@/lib/errors/api-error';
 
 interface RouteContext {
-  params: Promise<{ id: string }> | { id: string };
+  params: Promise<{ id: string }>;
 }
 
 /**
