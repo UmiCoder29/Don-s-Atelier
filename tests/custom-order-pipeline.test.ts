@@ -20,6 +20,7 @@ import { GET as adminListCustomOrders } from '@/app/api/admin/custom-orders/rout
 import { GET as adminGetCustomOrder, PATCH as adminUpdateCustomOrder } from '@/app/api/admin/custom-orders/[id]/route';
 import { ErrorCode } from '@/lib/errors/error-codes';
 import { ConflictError, ForbiddenError } from '@/lib/errors/api-error';
+import { encryptField } from '@/lib/crypto/field-encryption';
 
 describe('Custom Order Pipeline, State Machine & WhatsApp Handoff (Prompt 12)', () => {
   const customerAEmail = 'james.harrington@example.com';
@@ -569,6 +570,85 @@ describe('Custom Order Pipeline, State Machine & WhatsApp Handoff (Prompt 12)', 
       const quotedHistory = acceptBody.data.statusHistory.find((h: { toStatus: string }) => h.toStatus === CustomOrderStatus.QUOTED);
       expect(quotedHistory).toBeDefined();
       expect(quotedHistory.note).toBeNull();
+    });
+
+    it('dual-check: history row is hidden from customer when only the isInternal flag is set (no marker)', async () => {
+      const order = await createTestOrder(CustomOrderStatus.IN_REVIEW, customerAId);
+
+      // Insert directly with isInternal = true and plaintext without [INTERNAL] marker
+      const flagOnlyRow = await prisma.customOrderStatusHistory.create({
+        data: {
+          customOrderId: order.id,
+          fromStatus: CustomOrderStatus.IN_REVIEW,
+          toStatus: CustomOrderStatus.IN_REVIEW,
+          changedBy: adminEmail,
+          note: encryptField('Secret internal observation without marker'),
+          isInternal: true,
+        },
+      });
+
+      const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}`, {
+        headers: { Authorization: `Bearer ${customerAToken}` },
+      });
+      const res = await getCustomOrderById(req, { params: Promise.resolve({ id: order.id }) });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const foundRow = body.data.statusHistory.find((h: { id: string }) => h.id === flagOnlyRow.id);
+      expect(foundRow).toBeUndefined();
+    });
+
+    it('dual-check: history row is hidden from customer when only the [INTERNAL] marker is present (isInternal is false)', async () => {
+      const order = await createTestOrder(CustomOrderStatus.IN_REVIEW, customerAId);
+
+      // Insert directly with isInternal = false and plaintext WITH [INTERNAL] marker (simulating un-backfilled row)
+      const markerOnlyRow = await prisma.customOrderStatusHistory.create({
+        data: {
+          customOrderId: order.id,
+          fromStatus: CustomOrderStatus.IN_REVIEW,
+          toStatus: CustomOrderStatus.IN_REVIEW,
+          changedBy: adminEmail,
+          note: encryptField('[INTERNAL] Legacy memo from before migration'),
+          isInternal: false,
+        },
+      });
+
+      const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}`, {
+        headers: { Authorization: `Bearer ${customerAToken}` },
+      });
+      const res = await getCustomOrderById(req, { params: Promise.resolve({ id: order.id }) });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const foundRow = body.data.statusHistory.find((h: { id: string }) => h.id === markerOnlyRow.id);
+      expect(foundRow).toBeUndefined();
+    });
+
+    it('dual-check: history row is visible to customer when neither flag nor marker is set', async () => {
+      const order = await createTestOrder(CustomOrderStatus.IN_REVIEW, customerAId);
+
+      // Insert customer-visible row with isInternal = false and NO [INTERNAL] marker
+      const publicRow = await prisma.customOrderStatusHistory.create({
+        data: {
+          customOrderId: order.id,
+          fromStatus: CustomOrderStatus.IN_REVIEW,
+          toStatus: CustomOrderStatus.IN_REVIEW,
+          changedBy: customerAId,
+          note: encryptField('Customer message: Lapel width adjustment confirmed'),
+          isInternal: false,
+        },
+      });
+
+      const req = new NextRequest(`http://localhost:3000/api/custom-orders/${order.id}`, {
+        headers: { Authorization: `Bearer ${customerAToken}` },
+      });
+      const res = await getCustomOrderById(req, { params: Promise.resolve({ id: order.id }) });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const foundRow = body.data.statusHistory.find((h: { id: string }) => h.id === publicRow.id);
+      expect(foundRow).toBeDefined();
+      expect(foundRow.note).toBe('Customer message: Lapel width adjustment confirmed');
     });
   });
 

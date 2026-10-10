@@ -39,7 +39,7 @@
 | `/api/custom-orders/[id]/attachments` | POST | `requireAuth` | Yes | Yes (`uploadAttachmentSchema.strict()`) |
 | `/api/custom-orders/[id]/attachments/[attachmentId]` | GET | `requireAuth` | Yes | N/A (No request body) |
 | `/api/custom-orders/[id]/messages` | POST | `requireAuth` | Yes | Yes (`addCustomOrderNoteSchema.strict()`) |
-| `/api/custom-orders/[id]/notes` | POST | `requireAuth` | Yes | Yes (`addCustomOrderNoteSchema.strict()`) |
+| `/api/custom-orders/[id]/notes` | POST | `requireRole('ADMIN')` | Yes | Yes (`addCustomOrderNoteSchema.strict()`) |
 | `/api/custom-orders/[id]/whatsapp` | GET | `requireAuth` | Yes | N/A (No request body) |
 | `/api/custom-orders/[id]/withdraw` | POST | `requireAuth` | Yes | Yes (`withdrawCustomOrderSchema.strict()`) (Body optional by design) |
 | `/api/health` | GET, HEAD | `anonymous` | Yes (All) | N/A (No request body) |

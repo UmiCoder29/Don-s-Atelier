@@ -1053,7 +1053,41 @@ export class OrderService {
 
         const order = payment.order;
 
-        // 3. Verify event amount equals order total! (Wrong-amount event does nothing)
+        const targetCurrency = (payment.currency || 'usd').toUpperCase();
+        const rawEventCurrency = object.currency;
+        const eventCurrency = typeof rawEventCurrency === 'string' ? rawEventCurrency.toUpperCase() : undefined;
+        if (eventCurrency && eventCurrency !== targetCurrency) {
+          logger.warn(
+            `Webhook event currency (${eventCurrency}) does not match order currency (${targetCurrency}). No-op.`,
+            {
+              eventId: event.id,
+              eventCurrency,
+              orderCurrency: targetCurrency,
+              orderId: order.id,
+            }
+          );
+          await logAuditEvent({
+            tx,
+            actor: systemActor('payment_webhook'),
+            action: 'WEBHOOK_CURRENCY_MISMATCH',
+            entity: 'Order',
+            entityId: order.id,
+            metadata: {
+              orderId: order.id,
+              eventId: event.id,
+              orderCurrency: targetCurrency,
+              eventCurrency,
+            },
+          });
+          return {
+            handled: false,
+            status: 'currency_mismatch_no_op',
+            eventId: event.id,
+            orderId: order.id,
+          };
+        }
+
+        // 3b. Verify event amount equals order total! (Wrong-amount event does nothing, logs audit trail)
         const eventAmount = object.amountInCents !== undefined ? object.amountInCents : object.amount;
         if (eventAmount !== undefined && eventAmount !== order.totalInCents) {
           logger.warn(
@@ -1064,6 +1098,18 @@ export class OrderService {
               orderTotal: order.totalInCents,
             }
           );
+          await logAuditEvent({
+            tx,
+            actor: systemActor('payment_webhook'),
+            action: 'WEBHOOK_AMOUNT_MISMATCH',
+            entity: 'Order',
+            entityId: order.id,
+            metadata: {
+              orderId: order.id,
+              expectedAmountInCents: order.totalInCents,
+              receivedAmountInCents: eventAmount,
+            },
+          });
           return {
             handled: false,
             status: 'amount_mismatch_no_op',

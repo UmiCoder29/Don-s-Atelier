@@ -677,13 +677,13 @@ describe('Bespoke Custom Order API Routes', () => {
   // 6. Customer Follow-up Notes & Messages Flow
   // ==============================================================================
 
-  it('allows Customer A to add a follow-up note and message to their custom order', async () => {
-    // 1. Customer adds note via /notes
+  it('allows ADMIN to add an internal note and Customer A to add a message to custom order', async () => {
+    // 1. Admin adds internal note via /notes
     const noteText = 'Can we arrange a secondary fitting for sleeve pitch adjustments?';
     const noteReq = new NextRequest(`http://localhost:3000/api/custom-orders/${createdCustomOrderId}/notes`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${customerAToken}`,
+        'Authorization': `Bearer ${adminToken}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ note: noteText }),

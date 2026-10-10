@@ -386,6 +386,14 @@ describe('Route Matrix Security & Validation Suite', { timeout: 60000 }, () => {
         url: 'http://localhost:3000/api/uploads',
         body: { fileName: 'photo.jpg', mimeType: 'image/jpeg', size: 1024, folder: 'showcase' },
       },
+      {
+        name: 'POST /api/custom-orders/[id]/notes',
+        handler: addCustomOrderNote,
+        method: 'POST',
+        url: 'http://localhost:3000/api/custom-orders/co-id/notes',
+        context: { params: Promise.resolve({ id: 'co-id' }) },
+        body: { note: 'Internal tailor note' },
+      },
     ];
 
     for (const route of adminRoutes) {
@@ -494,7 +502,7 @@ describe('Route Matrix Security & Validation Suite', { timeout: 60000 }, () => {
     it('POST /api/custom-orders/[id]/notes rejects unknown field with 422', async () => {
       const req = new NextRequest(`http://localhost:3000/api/custom-orders/${customerACustomOrderId}/notes`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${customerAToken}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ note: 'Note text', __unknown_field: 'malicious' }),
       });
       const res = await addCustomOrderNote(req, { params: Promise.resolve({ id: customerACustomOrderId }) });

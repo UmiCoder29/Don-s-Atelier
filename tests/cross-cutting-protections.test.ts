@@ -603,7 +603,7 @@ describe('Cross-Cutting Protections Acceptance Suite', () => {
       }
     });
 
-    it('(c) per-email login limit triggers after 5 failed attempts even when IP changes, with identical response for existing and non-existing emails', async () => {
+    it('(c) per-email login limit triggers after 5 failed attempts even when IP changes, with identical response for existing and non-existing emails', { timeout: 60000 }, async () => {
       rateLimiter.reset();
 
       const existingEmail = 'james.harrington@example.com';

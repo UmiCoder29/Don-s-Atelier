@@ -303,7 +303,7 @@ describe('Mass-Assignment Security Suite (tests/mass-assignment.test.ts)', () =>
     });
 
     it('POST /api/custom-orders/[id]/notes: rejects role, id, isInternal, customerId with 422', async () => {
-      const req = makeJsonReq(`http://localhost:3000/api/custom-orders/${testCustomOrderId}/notes`, 'POST', customerToken, {
+      const req = makeJsonReq(`http://localhost:3000/api/custom-orders/${testCustomOrderId}/notes`, 'POST', adminToken, {
         note: 'Customer follow-up note',
         role: 'ADMIN',
         isInternal: true,

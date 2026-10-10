@@ -66,23 +66,19 @@ describe('Order & Checkout API Routes', { timeout: 60000 }, () => {
     variantPriceInCents = variant.priceInCents;
 
     // 5. Provision address for Customer A
-    const addrA = await prisma.address.findFirst({ where: { profileId: customerAId } });
-    customerAAddressId = addrA
-      ? addrA.id
-      : (
-          await prisma.address.create({
-            data: {
-              profileId: customerAId,
-              recipientName: 'James Harrington',
-              line1: '10 Savile Row',
-              city: 'London',
-              state: 'Greater London',
-              postalCode: 'W1S 3PB',
-              country: 'GB',
-              phone: '+442079460991',
-            },
-          })
-        ).id;
+    const createdAddr = await prisma.address.create({
+      data: {
+        profileId: customerAId,
+        recipientName: 'James Harrington',
+        line1: '10 Savile Row',
+        city: 'London',
+        state: 'Greater London',
+        postalCode: 'W1S 3PB',
+        country: 'GB',
+        phone: '+442079460991',
+      },
+    });
+    customerAAddressId = createdAddr.id;
   });
 
   afterAll(async () => {
@@ -92,6 +88,9 @@ describe('Order & Checkout API Routes', { timeout: 60000 }, () => {
       await prisma.payment.deleteMany({ where: { orderId: createdOrderId } }).catch(() => {});
       await prisma.orderItem.deleteMany({ where: { orderId: createdOrderId } }).catch(() => {});
       await prisma.order.deleteMany({ where: { id: createdOrderId } }).catch(() => {});
+    }
+    if (customerAAddressId) {
+      await prisma.address.delete({ where: { id: customerAAddressId } }).catch(() => {});
     }
     // Restore stock if needed
     if (testVariantId) {

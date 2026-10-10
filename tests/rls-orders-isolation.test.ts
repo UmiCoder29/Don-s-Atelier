@@ -130,7 +130,7 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
     }
   });
 
-  it('ACCEPTANCE: Customer B CANNOT read Customer A order via Supabase client directly (RLS enforced)', async () => {
+  it('ACCEPTANCE: Customer B CANNOT read Customer A order via Supabase client directly (permission denied 42501)', async () => {
     // Instantiate Supabase client acting as Customer B with their authenticated JWT
     const supabaseClientB = createSupabaseUserClient(customerBToken);
 
@@ -140,12 +140,13 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
       .select('*')
       .eq('id', customerAOrderId);
 
-    expect(error).toBeNull();
-    // RLS policy "orders_select_own_or_admin" strictly hides records where profileId != auth.uid()
-    expect(targetOrderData).toHaveLength(0);
+    // Direct table SELECT revoked: PostgREST returns 42501 permission denied
+    expect(error).toBeDefined();
+    expect(error?.code).toBe('42501');
+    expect(targetOrderData).toBeNull();
   });
 
-  it('Customer B CAN read their OWN order via Supabase client directly', async () => {
+  it('Customer B CANNOT read orders directly via Supabase client (all reads must go through server API)', async () => {
     const supabaseClientB = createSupabaseUserClient(customerBToken);
 
     const { data, error } = await supabaseClientB
@@ -153,13 +154,12 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
       .select('*')
       .eq('id', customerBOrderId);
 
-    expect(error).toBeNull();
-    expect(data).toHaveLength(1);
-    expect(data![0].id).toBe(customerBOrderId);
-    expect(data![0].profileId).toBe(customerBProfileId);
+    expect(error).toBeDefined();
+    expect(error?.code).toBe('42501');
+    expect(data).toBeNull();
   });
 
-  it('Customer A CAN read their OWN order via Supabase client directly', async () => {
+  it('Customer A CANNOT read orders directly via Supabase client (all reads must go through server API)', async () => {
     const supabaseClientA = createSupabaseUserClient(customerAToken);
 
     const { data, error } = await supabaseClientA
@@ -167,13 +167,12 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
       .select('*')
       .eq('id', customerAOrderId);
 
-    expect(error).toBeNull();
-    expect(data).toHaveLength(1);
-    expect(data![0].id).toBe(customerAOrderId);
-    expect(data![0].profileId).toBe(customerAProfileId);
+    expect(error).toBeDefined();
+    expect(error?.code).toBe('42501');
+    expect(data).toBeNull();
   });
 
-  it('Customer A CANNOT read Customer B order via Supabase client directly', async () => {
+  it('Customer A CANNOT read Customer B order via Supabase client directly (permission denied 42501)', async () => {
     const supabaseClientA = createSupabaseUserClient(customerAToken);
 
     const { data, error } = await supabaseClientA
@@ -181,24 +180,27 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
       .select('*')
       .eq('id', customerBOrderId);
 
-    expect(error).toBeNull();
-    expect(data).toHaveLength(0);
+    expect(error).toBeDefined();
+    expect(error?.code).toBe('42501');
+    expect(data).toBeNull();
   });
 
-  it('Unauthenticated anonymous client CANNOT read any orders via Supabase client directly', async () => {
+  it('Unauthenticated anonymous client CANNOT read any orders via Supabase client directly (permission denied 42501)', async () => {
     const anonClient = createSupabaseUserClient(); // No auth JWT provided
 
     const { data, error } = await anonClient
       .from('orders')
       .select('*');
 
-    expect(error).toBeNull();
-    expect(data).toHaveLength(0);
+    expect(error).toBeDefined();
+    expect(error?.code).toBe('42501');
+    expect(data).toBeNull();
   });
 
-  it('Public catalog items (categories, active products) ARE readable by unauthenticated client', async () => {
+  it('Public catalog items (categories, active products) ARE readable by unauthenticated client, while inactive products are hidden', async () => {
     const anonClient = createSupabaseUserClient();
 
+    // 1. Categories are readable
     const { data: categories, error: catError } = await anonClient
       .from('categories')
       .select('name, slug');
@@ -206,6 +208,7 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
     expect(catError).toBeNull();
     expect(categories!.length).toBeGreaterThanOrEqual(5);
 
+    // 2. Active products are readable
     const { data: products, error: prodError } = await anonClient
       .from('products')
       .select('name, brand, status')
@@ -214,10 +217,36 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
     expect(prodError).toBeNull();
     expect(products!.length).toBeGreaterThanOrEqual(12);
     expect(products![0].brand).toBe("Don's Atelier");
+
+    // 3. Create an inactive product to assert anon cannot read inactive ones
+    const inactiveProduct = await prisma.product.create({
+      data: {
+        name: `Inactive Hidden Suit Test ${Date.now()}`,
+        slug: `inactive-hidden-suit-${Date.now()}`,
+        description: 'Test inactive suit for RLS isolation',
+        categoryId: (await prisma.category.findFirstOrThrow()).id,
+        fabric: '100% Wool',
+        fit: 'Slim Fit',
+        status: 'ARCHIVED',
+      },
+    });
+
+    try {
+      const { data: hiddenData, error: hiddenError } = await anonClient
+        .from('products')
+        .select('*')
+        .eq('id', inactiveProduct.id);
+
+      expect(hiddenError).toBeNull();
+      // RLS policy products_select_active_or_admin hides non-ACTIVE products from anon (0 rows returned)
+      expect(hiddenData).toHaveLength(0);
+    } finally {
+      await prisma.product.delete({ where: { id: inactiveProduct.id } }).catch(() => {});
+    }
   });
 
   describe('order_status_history RLS Isolation', () => {
-    it('Customer A CAN read their own order status history via Supabase client directly', async () => {
+    it('Customer A CANNOT read order status history via direct Supabase client (permission denied 42501)', async () => {
       const supabaseClientA = createSupabaseUserClient(customerAToken);
 
       const { data, error } = await supabaseClientA
@@ -225,12 +254,12 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
         .select('*')
         .eq('orderId', customerAOrderId);
 
-      expect(error).toBeNull();
-      expect(data!.length).toBeGreaterThanOrEqual(1);
-      expect(data![0].orderId).toBe(customerAOrderId);
+      expect(error).toBeDefined();
+      expect(error?.code).toBe('42501');
+      expect(data).toBeNull();
     });
 
-    it('Customer B CANNOT read Customer A order status history (RLS enforced)', async () => {
+    it('Customer B CANNOT read Customer A order status history (permission denied 42501)', async () => {
       const supabaseClientB = createSupabaseUserClient(customerBToken);
 
       const { data, error } = await supabaseClientB
@@ -238,8 +267,9 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
         .select('*')
         .eq('orderId', customerAOrderId);
 
-      expect(error).toBeNull();
-      expect(data).toHaveLength(0);
+      expect(error).toBeDefined();
+      expect(error?.code).toBe('42501');
+      expect(data).toBeNull();
     });
 
     it('Customer CANNOT insert into order_status_history via client (no client write policy)', async () => {
@@ -310,30 +340,28 @@ describe('Supabase Row Level Security (RLS) - Order Isolation Acceptance', () =>
   });
 
   describe('Direct Client Write Attacks Lockdown (Server-Authoritative Writes Only)', () => {
-    it('POSITIVE CONTROL: customer A anon-key client CAN still SELECT their own order and profile', async () => {
+    it('DEFENSE IN DEPTH: customer A client CANNOT directly SELECT orders or profiles (42501 permission denied)', async () => {
       const clientA = createSupabaseUserClient(customerAToken);
 
-      // Customer A can read their own order
+      // Customer A direct read on orders is blocked at the table grant level
       const { data: orderData, error: orderError } = await clientA
         .from('orders')
         .select('*')
         .eq('id', customerAOrderId);
 
-      expect(orderError).toBeNull();
-      expect(orderData).toHaveLength(1);
-      expect(orderData![0].id).toBe(customerAOrderId);
-      expect(orderData![0].profileId).toBe(customerAProfileId);
+      expect(orderError).toBeDefined();
+      expect(orderError?.code).toBe('42501');
+      expect(orderData).toBeNull();
 
-      // Customer A can read their own profile
+      // Customer A direct read on profiles is blocked at the table grant level
       const { data: profileData, error: profileError } = await clientA
         .from('profiles')
         .select('*')
         .eq('id', customerAProfileId);
 
-      expect(profileError).toBeNull();
-      expect(profileData).toHaveLength(1);
-      expect(profileData![0].id).toBe(customerAProfileId);
-      expect(profileData![0].email).toBe(customerAEmail);
+      expect(profileError).toBeDefined();
+      expect(profileError?.code).toBe('42501');
+      expect(profileData).toBeNull();
     });
 
     it('rejects customer from directly setting own profiles.role to ADMIN', async () => {

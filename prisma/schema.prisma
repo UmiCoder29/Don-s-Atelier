@@ -395,6 +395,7 @@ model CustomOrderStatusHistory {
   toStatus      CustomOrderStatus
   changedBy     String            // Profile ID or "system"
   note          String?
+  isInternal    Boolean
   timestamp     DateTime          @default(now())
 
   @@index([customOrderId])

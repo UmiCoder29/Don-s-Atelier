@@ -869,6 +869,67 @@ describe('Checkout Hardening Acceptance Suite', { timeout: 120000 }, () => {
       // Order must REMAIN in PENDING status! (NOT updated to PAID!)
       const order = await prisma.order.findUnique({ where: { id: webhookOrderId } });
       expect(order!.status).toBe(OrderStatus.PENDING);
+
+      // Must record audit log for amount mismatch
+      const amountMismatchAudit = await prisma.auditLog.findFirst({
+        where: {
+          entityId: webhookOrderId,
+          action: 'WEBHOOK_AMOUNT_MISMATCH',
+        },
+      });
+      expect(amountMismatchAudit).toBeDefined();
+      expect((amountMismatchAudit!.metadata as any).orderId).toBe(webhookOrderId);
+      expect((amountMismatchAudit!.metadata as any).expectedAmountInCents).toBe(expectedTotal);
+      expect((amountMismatchAudit!.metadata as any).receivedAmountInCents).toBe(expectedTotal - 5000);
+    });
+
+    it('rejects webhook with mismatched currency without state change and logs WEBHOOK_CURRENCY_MISMATCH', async () => {
+      const wrongCurrencyPayload = JSON.stringify({
+        id: `evt_wrong_currency_${Date.now()}`,
+        type: 'payment_intent.succeeded',
+        data: {
+          object: {
+            id: webhookPaymentRef,
+            orderId: webhookOrderId,
+            amountInCents: expectedTotal,
+            currency: 'eur', // Mismatched currency! Order is in USD
+            status: 'succeeded',
+          },
+        },
+        created: Math.floor(Date.now() / 1000),
+      });
+
+      const sig = paymentProvider.generateWebhookSignature(wrongCurrencyPayload, DEFAULT_WEBHOOK_SECRET);
+
+      const req = new NextRequest('http://localhost:3000/api/webhooks/payments', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Stripe-Signature': sig,
+        },
+        body: wrongCurrencyPayload,
+      });
+
+      const res = await webhookRoute(req, {} as never);
+      expect(res.status).toBe(200);
+
+      const body = await res.json();
+      expect(body.data.status).toBe('currency_mismatch_no_op');
+
+      // Order must REMAIN in PENDING status!
+      const order = await prisma.order.findUnique({ where: { id: webhookOrderId } });
+      expect(order!.status).toBe(OrderStatus.PENDING);
+
+      // Must record audit log for currency mismatch
+      const currencyMismatchAudit = await prisma.auditLog.findFirst({
+        where: {
+          entityId: webhookOrderId,
+          action: 'WEBHOOK_CURRENCY_MISMATCH',
+        },
+      });
+      expect(currencyMismatchAudit).toBeDefined();
+      expect((currencyMismatchAudit!.metadata as any).orderCurrency).toBe('USD');
+      expect((currencyMismatchAudit!.metadata as any).eventCurrency).toBe('EUR');
     });
 
     it('treats a replayed webhook event ID as an idempotent no-op', async () => {

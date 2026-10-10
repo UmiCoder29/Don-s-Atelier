@@ -22,6 +22,6 @@ export const POST = withErrorHandler<RouteContext>(async (req: NextRequest, cont
   const body = await req.json();
   const input = addCustomOrderNoteSchema.parse(body);
 
-  const updatedOrder = await bespokeService.addNote(user, id, input);
+  const updatedOrder = await bespokeService.addNote(user, id, input, false);
   return successResponse(updatedOrder, requestId, {}, 200);
 });

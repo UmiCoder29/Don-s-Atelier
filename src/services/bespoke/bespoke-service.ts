@@ -197,6 +197,7 @@ export class BespokeService {
             toStatus: CustomOrderStatus.SUBMITTED,
             changedBy: user.id,
             note: encryptField('Initial bespoke request submitted by customer'),
+            isInternal: false,
           },
         });
 
@@ -273,23 +274,36 @@ export class BespokeService {
     const isAdmin = user.role === Role.ADMIN;
     const whatsappHandoffUrl = generateWhatsAppHandoffUrl(order.orderNumber);
 
-    // Decrypt and process status history
+    // Decrypt and process status history with dual-check filter
     let latestInternalNote: string | null = null;
-    const sanitizedHistory = order.statusHistory.map((h) => {
+    const historyRows = order.statusHistory.filter((h) => {
       const decryptedNote = h.note ? decryptField(h.note) : null;
-      const isInternal = Boolean(decryptedNote && decryptedNote.startsWith('[INTERNAL]'));
+      const isInternal = Boolean(h.isInternal || (decryptedNote && decryptedNote.startsWith('[INTERNAL]')));
 
       if (isInternal && decryptedNote && !latestInternalNote) {
         latestInternalNote = decryptedNote.replace(/^\[INTERNAL\]\s*/, '');
       }
 
       if (!isAdmin && isInternal) {
-        // Strip internal note from customer response (explicitly nulled)
+        // Pure internal notes (no status transition) are completely hidden from customer
+        if (h.fromStatus === h.toStatus || !h.fromStatus) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    const sanitizedHistory = historyRows.map((h) => {
+      const decryptedNote = h.note ? decryptField(h.note) : null;
+      const isInternal = Boolean(h.isInternal || (decryptedNote && decryptedNote.startsWith('[INTERNAL]')));
+
+      if (!isAdmin && isInternal) {
         return {
           id: h.id,
           fromStatus: h.fromStatus,
           toStatus: h.toStatus,
           timestamp: h.timestamp,
+          isInternal: h.isInternal,
           note: null,
         };
       }
@@ -299,6 +313,7 @@ export class BespokeService {
         fromStatus: h.fromStatus,
         toStatus: h.toStatus,
         timestamp: h.timestamp,
+        isInternal: h.isInternal,
         note: isInternal && isAdmin && decryptedNote ? decryptedNote.replace(/^\[INTERNAL\]\s*/, '') : decryptedNote,
       };
     });
@@ -422,13 +437,26 @@ export class BespokeService {
 
     const decryptedOrders = orders.map((order) => {
       let latestInternalNote: string | null = null;
-      const sanitizedHistory = order.statusHistory.map((h) => {
+      const historyRows = order.statusHistory.filter((h) => {
         const decryptedNote = h.note ? decryptField(h.note) : null;
-        const isInternal = Boolean(decryptedNote && decryptedNote.startsWith('[INTERNAL]'));
+        const isInternal = Boolean(h.isInternal || (decryptedNote && decryptedNote.startsWith('[INTERNAL]')));
 
         if (isInternal && decryptedNote && !latestInternalNote) {
           latestInternalNote = decryptedNote.replace(/^\[INTERNAL\]\s*/, '');
         }
+
+        if (!isAdmin && isInternal) {
+          // Pure internal notes (no status transition) are completely hidden from customer
+          if (h.fromStatus === h.toStatus || !h.fromStatus) {
+            return false;
+          }
+        }
+        return true;
+      });
+
+      const sanitizedHistory = historyRows.map((h) => {
+        const decryptedNote = h.note ? decryptField(h.note) : null;
+        const isInternal = Boolean(h.isInternal || (decryptedNote && decryptedNote.startsWith('[INTERNAL]')));
 
         if (!isAdmin && isInternal) {
           return {
@@ -436,6 +464,7 @@ export class BespokeService {
             fromStatus: h.fromStatus,
             toStatus: h.toStatus,
             timestamp: h.timestamp,
+            isInternal: h.isInternal,
             note: null,
           };
         }
@@ -445,6 +474,7 @@ export class BespokeService {
           fromStatus: h.fromStatus,
           toStatus: h.toStatus,
           timestamp: h.timestamp,
+          isInternal: h.isInternal,
           note: isInternal && isAdmin && decryptedNote ? decryptedNote.replace(/^\[INTERNAL\]\s*/, '') : decryptedNote,
         };
       });
@@ -598,8 +628,10 @@ export class BespokeService {
 
         // 4. Handle internal notes encryption
         let historyNoteText: string;
+        let isInternalNote = false;
         if (input.internalNotes) {
           historyNoteText = `[INTERNAL] ${input.internalNotes}`;
+          isInternalNote = true;
         } else if (input.notes) {
           historyNoteText = input.notes;
         } else if (current.status === CustomOrderStatus.QUOTED && nextStatus === CustomOrderStatus.QUOTED && finalPrice) {
@@ -627,6 +659,7 @@ export class BespokeService {
             toStatus: nextStatus,
             changedBy: adminUser.id,
             note: encryptedHistoryNote,
+            isInternal: isInternalNote,
           },
         });
 
@@ -751,6 +784,7 @@ export class BespokeService {
             toStatus: CustomOrderStatus.ACCEPTED,
             changedBy: customerUser.id,
             note: encryptField(historyNote),
+            isInternal: false,
           },
         });
 
@@ -850,6 +884,7 @@ export class BespokeService {
             toStatus: CustomOrderStatus.REJECTED,
             changedBy: user.id,
             note: encryptField(reason),
+            isInternal: false,
           },
         });
 
@@ -1031,7 +1066,7 @@ export class BespokeService {
     // If customer just wants to add a note or message without status change
     const noteText = input.notes || input.message;
     if (noteText) {
-      return this.addNote(user, customOrderId, { note: noteText });
+      return this.addNote(user, customOrderId, { note: noteText }, false);
     }
 
     return this.getCustomOrderById(user, customOrderId);
@@ -1041,7 +1076,7 @@ export class BespokeService {
    * Adds a customer follow-up message or note to their bespoke custom suit request.
    * Field-level encrypts the note and logs to status history.
    */
-  async addNote(user: AuthenticatedUser, customOrderId: string, input: AddCustomOrderNoteInput) {
+  async addNote(user: AuthenticatedUser, customOrderId: string, input: AddCustomOrderNoteInput, isInternalNote?: boolean) {
     const existing = await prisma.customOrder.findUnique({
       where: { id: customOrderId },
     });
@@ -1052,9 +1087,13 @@ export class BespokeService {
 
     assertOwnerOrAdmin(user, existing.profileId);
 
-    const noteText = input.note || input.message || '';
+    const isInternal = isInternalNote !== undefined ? isInternalNote : user.role === Role.ADMIN;
+    let noteText = input.note || input.message || '';
     if (!noteText.trim()) {
       throw new BadRequestError('Note or message cannot be empty');
+    }
+    if (isInternal && !noteText.startsWith('[INTERNAL]')) {
+      noteText = `[INTERNAL] ${noteText}`;
     }
 
     const currentNotes = existing.notes ? decryptField(existing.notes) : '';
@@ -1081,6 +1120,7 @@ export class BespokeService {
             toStatus: existing.status,
             changedBy: user.id,
             note: encryptedHistoryNote,
+            isInternal,
           },
         });
 
